@@ -1,0 +1,328 @@
+#!/usr/bin/env zsh
+
+typeset -g PROGNAME="${0:t}"
+
+# -- defaults
+typeset -g DEFAULT_NPLOT=1
+typeset -g DEFAULT_IPRINT=1
+typeset -g DEFAULT_IGUESS=2
+typeset -g DEFAULT_NEXPMAXSTEP=4
+typeset -g DEFAULT_TOTWEIGHT=0.25
+typeset -g DEFAULT_NOEXPWEIGHT=0.03
+
+typeset -g numcbas_namelist_template="&INPUT
+ title=<<TITLE>>,
+ ecmax=<<ECMAX>>, !Maximum energy of the numerical eigenfunctions
+ lval=<<LVAL>>,    !angular momentum
+ rlim=<<RLIMP2>>, !radial domain limit: this is recommended to be R-matrix radius + 2
+ charge=<<CHARGE>>,!charge of the target
+ /"
+
+typeset -g gtobas_namelist_template="&FIT
+ noexp=<<NOEXP>>,     !number of exponents
+ iguess=<<IGUESS>>,    !type of initial guess: leave as is
+ nplot=<<NPLOT>>,     !output flag
+ iprint=<<IPRINT>>,    !output flag
+ /"
+
+BAT="$(command -v bat)"
+BAT="${BAT:-cat}"
+
+usage() {
+cat <<help
+
+    $PROGNAME
+
+Usage:
+
+    $PROGNAME [options]
+
+Requires:
+  - numcbas
+  - gtobas
+  - my 'gtobas_reldiff' awk script
+
+Options:
+
+    --lmin         LMIN     the lowest  partial wave for which to find continuum solutions
+
+    --lmax         LMAX     the highest partial wave for which to find continuum solutions
+
+    -r, --rlim     RLIM     the R-matrix radius (bohr). Continuum solutions will be optimized for RLIM+2
+
+    -e, --ecmax     EMAX     the highest energy (Rydberg) to consider. Higher energyies usually need larger
+                            numbers of gaussians
+
+    -c, --chrg     CHRG     the target charge (au)
+
+    -m, --minimize WHICH    minimize the total, the maximum individual difference between the numerical
+                            solutions and the Gaussian fits, or a hybrid approach. WHICH must be one of
+                            'total', 'maximum', or 'hybrid'
+
+  No defaults are provided for the above; all non-help options must be passed.
+
+  Optional options
+
+    -h, --help                      show this message
+
+    -n, --nexpmaxstep  NEXPMAXSTEP  do not try to fit more than nsol + NEXPMAXSTEP Gaussians,
+                                    where nsol is the number of solutions for a given l
+
+    --totweight        TOTWEIGHT    when using the hybrid approach in --minimize, the total and max individual
+    --noexpweight      NOEXPWEIGHT  differences are weighted as individual + TOTWEIGHT * total + NOEXPWEIGHT * noexp
+
+    --noexp            n1,n2,n3..   the basis that is assumed to be located in l\$l1/noexp\$n1-swmol3
+
+    --output           FILENAME     output the final basis for UKRmol+ in this file, overriding the default
+
+help
+}
+
+die() {
+  local msg="$1"
+  print -u2 -- "ERROR: $msg"
+  exit 1
+}
+
+_get_required_arg() {
+  local name="$1"
+  local -a arr=( ${(P)name} ) # expand the variable with name name
+  (( ${#arr[@]} >= 2 )) || die "missing required option --${name}"
+  print -- "${arr[2]}"
+}
+
+_get_optional_arg() {
+  local name="$1"
+  local default="$2"
+  local -a arr=( ${(P)name} )
+  if [[ ${#arr[@]} -ge 2 ]] ; then
+    print -- "${arr[2]}"
+  else
+    print -- "${default}"
+  fi
+}
+
+
+_fill_numcbas() {
+  local out="${numcbas_namelist_template}"
+  out="${out}"
+  out="${out//<<TITLE>>/'$title'}"
+  out="${out//<<ECMAX>>/$ecmax}"
+  out="${out//<<RLIMP2>>/$rlimp2}"
+  out="${out//<<CHARGE>>/$chrg}"
+  out="${out//<<LVAL>>/$l}"
+  print -r -- "${out}"
+}
+
+_fill_gtobas() {
+  local noexp="$1"
+  local out="${gtobas_namelist_template}"
+  out="${out//<<NOEXP>>/$noexp}"
+  out="${out//<<IGUESS>>/$iguess}"
+  out="${out//<<IPRINT>>/$iprint}"
+  out="${out//<<NPLOT>>/$nplot}"
+  print -r -- "${out}"
+}
+
+_auto_find_noexp() {
+  # -- loop over l; find optimal noexp for each
+  [[ lmax -eq lmin ]] || print -- "l will range from $lmin to $lmax"
+  for l in {"$lmin".."$lmax"} ; do
+
+    mkdir -p l"$l"
+
+    print --
+    print -- "Running NUMCBAS for l = $l"
+    print --
+    numcbas_out="l${l}/numcbas.out"
+    numcbas < <(_fill_numcbas) > "$numcbas_out"
+
+    nexpmin="$(awk '/No\. of eigensolutions/ { print $NF }' "$numcbas_out")"
+    [[ -z "$nexpmin" ]] && die "Could not determine number of solutions in numcbas output file $numcbas_out"
+    nexpmax="$(( nexpmin + nexpmaxstep ))"
+
+    print -n -- "Found $nexpmin continuum solutions; "
+    if [[ nexpmaxstep -gt 1 ]] ; then
+      print -- "will attempt GTOBAS runs with $nexpmin to $nexpmax Gaussians"
+    else
+      print -- "will attempt a GTOBAS run with $nexpmin Gaussians"
+    fi
+
+    # -- loop over noexp; find the one that minimizes the relative differences
+    #    in NUMCBAS solutions and GTOBAS fits
+    typeset -A mindiffs=()
+    mindiff="DNE"
+    for noexp in {"$nexpmin".."$nexpmax"} ; do
+      print -- "noexp: $noexp"
+      gtobas < <(_fill_gtobas "$noexp") > "l${l}/gtobas.out"
+
+      if [[ -e fort.17 ]] ; then
+
+        reldiff_output="l${l}/noexp${noexp}-reldiff"
+        gtobas_reldiff fort.17 > "$reldiff_output"
+
+        mindiff_total="$(awk -F= '/total resl_L2/ { print $2 }' < <(sed '1,/TOTAL/d' "$reldiff_output") )"
+        mindiff_maxim="$(awk -F= '/max individual resl_L2/ { print $2 }' < <(sed '1,/TOTAL/d' "$reldiff_output") )"
+        mindiff_hybrid_score="$(( mindiff_maxim + totweight * mindiff_total + noexpweight * noexp))"
+        print -- "  maximum L2 norm difference:      $mindiff_maxim"
+        print -- "  total   L2 norm difference:      $mindiff_total"
+        print -- "  L2 norm difference hybrid score: $mindiff_hybrid_score"
+
+        case "$minimize" in
+          total)  mindiff_found="$mindiff_total" ; mindiffs["${noexp}"]="$mindiff_found" ;;
+          maxim)  mindiff_found="$mindiff_maxim" ; mindiffs["${noexp}"]="$mindiff_found" ;;
+          hybrid) mindiff_found="$mindiff_hybrid_score" ; mindiffs["${noexp}"]="$mindiff_found" ;;
+          *) die "Invalid value of minimize: $minimize" ;;
+        esac
+
+        mv fort.17 l"$l"/noexp$noexp-graphs
+
+        [[ "$mindiff" == "DNE" ]] && { mindiff="$mindiff_found" ; noexp_min="$noexp" }
+        [[ mindiff_found -lt mindiff ]] && { mindiff="$mindiff_found" ; noexp_min="$noexp" }
+
+      else
+        mindiffs["${noexp}"]="DNE"
+        print -- '  GTOBAS Failed ! Likely too many exponents for this configuration.'
+        print -- '  Skipping all noexp >= $noexp'
+        break
+      fi
+
+      [[ -e fort.18 ]] && mv fort.18 l"$l"/noexp$noexp-swmol3 || die "fort.18 not found"
+
+    done
+
+    print --
+    print -- "  Best number of Gaussians: $noexp_min"
+    print -- "  Minimal L2 norm difference: ${mindiffs["$noexp_min"]}"
+    noexp_this_l["$l"]="$noexp_min"
+
+    print -- "best noexp = $noexp_min" > "l$l/best-noexp"
+
+  done
+}
+
+_gto_basis_header() {
+  local nlvals="$1"
+  local noexps="$2"
+  local rlim="$3"
+  local ecmax="$4"
+  local header='&atom
+    atcord = >>>XXX<<<, >>>YYY<<<, >>>ZZZ<<<, ! in Angstroms
+    atnam = 'Scat',  ! atom - symbol
+    q = 0.0,         ! atomic number
+    iqm = <<NLVALS>>,         ! s,p,d - number of atomic symmetries
+    jco = <<NOEXPVALS>>
+  ! continuum for a = <<RLIM>> a.u., ecmax = <<ECMAX>>
+  /'
+  header="${header//<<NLVALS>>/$nlvals}"
+  header="${header//<<NOEXPVALS>>/$noexps},"
+  header="${header//<<RLIM>>/$rlim}"
+  header="${header//<<ECMAX>>/$ecmax}"
+  print -r -- "$header"
+}
+
+############
+### MAIN ###
+############
+
+main() {
+
+  zmodload zsh/zutil || die "Can't load zsh/zutil"
+
+  # -- parse options
+  typeset -A opts
+  zparseopts -D -E -A opts \
+    h=help -help=help \
+    -lmin:=lmin \
+    -lmax:=lmax \
+    r:=rlim -rlim:=rlim \
+    e:=ecmax -ecmax:=ecmax \
+    c:=chrg -chrg:=chrg \
+    n:=nexpmaxstep -nexpmaxstep:=nexpmaxstep \
+    m:=minimize -minimize:=minimize \
+    -lvals:=lvals \
+    -noexps:=noexps \
+    -output:=output \
+    || die "failed argument parsing"
+
+  (( ${#help[@]} )) && {usage; exit 0}
+
+  # -- loop over required options
+  argfail=false
+  for arg in lmin lmax rlim ecmax chrg minimize; do
+    val="$(_get_required_arg "$arg")" || { argfail=true ; continue }
+    printf -v "${arg}" '%s' "$val" # arg <- val
+  done
+  [[ "$argfail" == true ]] && {usage; exit 1}
+
+  # -- check values
+  [[ lmax -lt lmin ]] && die "lmax ($lmax) < lmin ($lmin) detected"
+  minimize="${minimize:l}"
+  case "$minimize" in
+    total | maximum | hybrid) ;;
+    *) die "minimize ($minimize) bust be one of 'total' or 'maximum'"
+  esac
+
+  # -- loop over facultative arguments
+  argfail=false
+  for arg in nexpmaxstep iguess iprint nplot totweight noexpweight ; do
+    defvar="DEFAULT_${arg:u}" # default value
+    val="$(_get_optional_arg "$arg" "${(P)defvar}")" || { argfail=true ; continue }
+    printf -v "${arg}" '%s' "$val" # arg <- val
+  done
+  [[ "$argfail" == true ]] && die "Failed parsing optional arguments"
+
+  # -- check executables
+  command -v numcbas        > /dev/null || die "numcbas not found on PATH"
+  command -v gtobas         > /dev/null || die "gtobas not found on PATH"
+  command -v gtobas_reldiff > /dev/null || die "gtobas_reldiff not found on PATH"
+
+  rlimp2="$((rlim + 2.0))"
+  [[ CHARGE -eq 0 ]] && title="Neutral target" || title="Charged target"
+
+  noexps_csv="${noexps[2]}"
+  noexps=( ${(s:,:)noexps_csv} )
+
+  [[ -z "${noexps}"  ]] && manual_mode=false || manual_mode=true
+
+  typeset -Ag noexp_this_l=()
+
+  if [[ "$manual_mode" == true ]] ; then
+    print
+    print -- "    Manual continuum basis requested"
+    print
+    local nlvals="$(( lmax - lmin + 1 ))"
+    [[ lmin -ne 0 ]] && die "lmin MUST be 0 in manual mode, because the basis assumes that we start at l=0"
+    [[ nlvals -ne ${#noexps[@]} ]] && die "number of LVALS from LMIN to LMAX must be the same as the number of NOEXPs"
+    # -- fill noexp_this_l manually
+    for i in {1..$nlvals} ; do
+      l=$(( i - 1 ))
+      noexp="${noexps[$i]}"
+      noexp_this_l[${l}]="$noexp"
+    done
+  elif [[ "$manual_mode" == false ]] ; then
+    # -- try to find the ideal noexp for each l automatically
+    _auto_find_noexp
+  else
+    die "Undetermined manual_mode: "$manual_mode
+  fi
+
+  [[ lmin -ne 0 ]] && { print -r -- "LMIN ($lmin) is nonzer0; refusing to build a basis !" ; exit 1 }
+
+  gto_basis_header="$(_gto_basis_header "${nlvals}" "${noexps_csv}" "${rlim}" "${ecmax}")"
+
+  [[ ! -z "${output[2]}" ]] && basis_file="${output[2]}" || basis_file="swmol3.continuum.q$chrg.r$rlim.L$lmax"
+  print -r -- "$gto_basis_header" > "$basis_file"
+
+  for l in {$lmin..$lmax} ; do
+    noexp="${noexp_this_l[$l]}"
+    swmol_file="l$l/noexp$noexp-swmol3"
+    # -- check that the file exists ans it not 0B
+    [[ -e "$swmol_file" ]] || die "basis file not found: $swmol_file"
+    [[ -s "$swmol_file" ]] || die "basis file is empty: $swmol_file"
+    cat "$swmol_file" >> "${basis_file}"
+  done
+
+}
+
+main "$@"

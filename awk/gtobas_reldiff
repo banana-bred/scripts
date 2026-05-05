@@ -121,7 +121,7 @@ END {
   print_fres()
   print "TOTAL:"
   printf "  npoints = %d\n", ntot
-  printf "  resl_L2 = %s\n", print_rel_l2(total_err2, total_ref2)
+  printf "  total resl_L2 = %s\n", print_rel_l2(total_err2, total_ref2)
   printf "  max individual resl_L2 = %s\n", print_max_fres()
 
 }
