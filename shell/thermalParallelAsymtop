@@ -1,18 +1,112 @@
-#!/bin/env zsh
+#!/usr/bin/env zsh
 
-Nmin=0
-Nmax=4
-dir=Smat/doublet
-lifetimes_file="doublet.channels"
-thermal_dir=thermal
-njobs=${NJOBS:-$(nproc)}
+PROGNAME="${0:t}"
 
-[[ -z "$(command -v parallel)" ]] && print -u2 -- "GNU Parallel is not installed. Maybe install it ?"
+DEFAULT_LIFETIMES="lifetimes.dat"
+DEFAULT_NJOBS="$(nproc)"
+DEFAULT_NMIN=""
+DEFAULT_NMAX=""
 
-jobfile="$(mktemp)"
+die() {
+  local message="$1"
+  print -u2 -- "$message"
+  exit 1
+}
+
+usage() {
+  cat << help
+
+$PROGNAME
+
+    Parallelize the state-selected thermal convolution of several files in the format
+
+        ...N_Ka_Kc.Np_Kap_Kcp.dat
+
+USAGE
+
+    $PROGNAME [OPTIONS] -i indir -o outdir
+
+ARGUMENTS
+
+    -i, --indir   INDIR    the input directory containing the files
+    -o, --outdir  OUTDIR   the output directory in which the thermal convolution results will live
+
+OPTIONS
+
+    --nmin     NMIN         minimum value of N and Np (skips files with smaller N or Np; default is to not skip any)
+    --nmax     NMAX         maximum value of N and Np (skips files with larger  N or Np; default is to not skip any)
+    --njobs    NJOBS        number of jobs to run at once (defaults to the result of nproc)
+    --lifetimes LIFETIMES   the file containing channel information (default "lifetimes.dat")
+
+help
+}
+
+_get_required_arg() {
+  local name="$1"
+  local -a arr=( ${(P)name} ) # expand the variable with name name
+  (( ${#arr[@]} >= 2 )) || die "missing required option --${name}"
+  print -- "${arr[2]}"
+}
+_get_optional_arg() {
+  local name="$1"
+  local default="$2"
+  local -a arr=( ${(P)name} )
+  if [[ ${#arr[@]} -ge 2 ]] ; then
+    print -- "${arr[2]}"
+  else
+    print -- "${default}"
+  fi
+}
+
+zmodload zsh/zutil || die "Can't load zsh/zutil"
+zparseopts -D -E -F \
+  h=help -help=help \
+  -nmin:=nmin \
+  -nmax:=nmax \
+  i:=indir -indir:=indir \
+  -lifetimes:=lifetimes \
+  o:=outdir -outdir:=outdir \
+  n:=njobs -njobs:=njobs
+
+(( "${#help[@]}" )) && {usage; exit 0}
+local argfail=0
+# -- non-optional arguments
+for arg in indir outdir  ; do
+  val="$(_get_required_arg "$arg")" || {argfail=1; continue}
+  printf -v "${arg}" '%s' "$val"
+done
+(( argfail )) && {usage; die "Failed to parse required arguments"}
+# -- optional arguments
+for optarg in nmin nmax lifetimes njobs ; do
+  defvar="DEFAULT_${optarg:u}"
+  val="$(_get_optional_arg "$optarg" "${(P)defvar}")" || {argfail=1; continue}
+  printf -v "${optarg}" '%s' "$val"
+done
+(( argfail )) && {usage; die "Failed to parse optional arguments"}
+
+command -v parallel > /dev/null || die "GNU Parallel is not installed. Maybe install it ?"
+
+# echo nmin $nmin
+# echo nmax $nmax
+# echo lifetimes $lifetimes
+# echo indir $indir
+# echo outdir $outdir
+# echo njobs $njobs
+# exit
+
+[[ -z "$indir" ]] && die "indir not defined"
+[[ -d "$indir" ]] || die "Input directory ("$indir") is not a directory"
+[[ -e "$outdir" && ! -d "$outdir" ]] && die "outdir exists ($outdir) but is not a directory"
+[[ -e "$lifetimes" ]] || die "Lifetimes/channels file ($lifetimes) not found"
+[[ -n $nmin ]] && echo nmin $nmin
+[[ -n $nmin && $nmin != <0-> ]] && die "nmin ($nmin) must be a nonnegative integer"
+[[ -n $nmax && $nmax != <0-> ]] && die "nmax ($nmax) must be a nonnegative integer"
+[[ $njobs != <1-> ]] && die "njobs ($njobs) must be a positive integer"
+[[ -n "$nmin" && -n "$nmax" ]] && (( nmin > nmax )) && die "nmin ($nmin) > max ($nmax) not allowed"
+
+jobfile="$(mktemp)" || die "Could not create temporary file"
+mkdir -p "$outdir" || die "Failed to create output directory $outdir"
 trap 'rm -f "${jobfile}"' EXIT
-
-mkdir -p "$thermal_dir"
 
 typeset -A energy
 
@@ -23,45 +117,72 @@ while read -r N Ka Kc E lifetime; do
   # N,Ka,Kc as key; store energy
   key="${N},${Ka},${Kc}"
   energy[$key]="$E"
-done < "$lifetimes_file"
+done < "$lifetimes"
 
-for file in "${dir}"/*_*_*.*_*_*.dat(N) ; do
+ntherm=0
+for file in "${indir}"/*_*_*.*_*_*.dat(N) ; do
   base="${file:t}"
   states="${base%.dat}"
-  states="${states#Smat.*}"
+  states="${states#*.}"
 
   # -- split .
   IFS='.' read -r left right <<< "$states"
 
   # -- split _
   IFS="_" read -r N Ka Kc <<< "$left"
+  [[ -n "$nmin" ]] && (( N < nmin )) && continue
+  [[ -n "$nmax" ]] && (( N > nmax )) && continue
   IFS="_" read -r Np Kap Kcp <<< "$right"
+  [[ -n "$nmin" ]] && (( Np < nmin )) && continue
+  [[ -n "$nmax" ]] && (( Np > nmax )) && continue
 
   key="${N},${Ka},${Kc}"
   keyp="${Np},${Kap},${Kcp}"
 
   E="${energy[$key]:-}"
   Ep="${energy[$keyp]:-}"
+  [[ -z "$E" ]] && die "No energy found for state $key"
+  [[ -z "$Ep" ]] && die "No energy found for state $keyp"
 
   input="$file"
-  output="${thermal_dir}/thermal.${N}_${Ka}_${Kc}.${Np}_${Kap}_${Kcp}.dat"
+  output="${outdir}/thermal.${N}_${Ka}_${Kc}.${Np}_${Kap}_${Kcp}.dat"
 
   # -- don't extrap excitation
-  [[ Ep -gt E ]] && extrap="" || extrap="--extrap"
+  (( Ep > E )) && extrap="" || extrap="--extrap"
 
-  print -- "Excitation: N,Ka,Kc->N',Ka',Kc': (${N},${Ka},${Kc}) -> (${Np}_${Kap}_${Kcp})"
+  print -- "Excitation: N,Ka,Kc->N',Ka',Kc': (${N},${Ka},${Kc}) -> (${Np},${Kap},${Kcp})"
   print -r -- "$input|$output|$extrap" >> "$jobfile"
+  ((ntherm++))
 
 done
 
-cat "$jobfile" | xargs -P "${njobs}" -I{} zsh -c '
-  IFS="|" read -r input output extrap <<< "{}"
+(( ntherm == 0 )) && die "No files were chosen for convoltution. Make sure that the input directory ($indir) is correct and that it has files in the proper format."
+
+parallel --colsep '\|' -j "$njobs" --halt soon,fail=1 '
+  input={1}
+  output={2}
+  extrap={3}
+
   print -r -- "Convolving $input -> $output"
+
   thermal \
     -i "$input" \
     -o "$output" \
     --Ti=10 --Tf=10000 --nT=100 --input-energy-units=ev --input-xs-units=cm \
     --logx \
     --electron-energy-min=1e-8 \
-    --num-extrap-energies=1000 "$extrap"
-'
+    --num-extrap-energies=1000 \
+    "$extrap"
+' :::: "$jobfile"
+
+# cat "$jobfile" | xargs -P "${njobs}" -I{} zsh -c '
+#   IFS="|" read -r input output extrap <<< "{}"
+#   print -r -- "Convolving $input -> $output"
+#   thermal \
+#     -i "$input" \
+#     -o "$output" \
+#     --Ti=10 --Tf=10000 --nT=100 --input-energy-units=ev --input-xs-units=cm \
+#     --logx \
+#     --electron-energy-min=1e-8 \
+#     --num-extrap-energies=1000 "$extrap"
+# '
