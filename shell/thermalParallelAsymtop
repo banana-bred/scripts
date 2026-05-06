@@ -37,6 +37,7 @@ OPTIONS
     --nmax     NMAX         maximum value of N and Np (skips files with larger  N or Np; default is to not skip any)
     --njobs    NJOBS        number of jobs to run at once (defaults to the result of nproc)
     --lifetimes LIFETIMES   the file containing channel information (default "lifetimes.dat")
+    -q, --quit              print less stuff to the screen
 
 help
 }
@@ -66,6 +67,7 @@ zparseopts -D -E -F \
   i:=indir -indir:=indir \
   -lifetimes:=lifetimes \
   o:=outdir -outdir:=outdir \
+  q=quietopt -quiet=quietopt \
   n:=njobs -njobs:=njobs
 
 (( "${#help[@]}" )) && {usage; exit 0}
@@ -83,6 +85,10 @@ for optarg in nmin nmax lifetimes njobs ; do
   printf -v "${optarg}" '%s' "$val"
 done
 (( argfail )) && {usage; die "Failed to parse optional arguments"}
+(( "${#quietopt[@]}" )) && quiet=1 || quiet=0
+
+# -- export quiet to be visible by the subshell for parallel
+export quiet
 
 command -v parallel > /dev/null || die "GNU Parallel is not installed. Maybe install it ?"
 
@@ -150,7 +156,7 @@ for file in "${indir}"/*_*_*.*_*_*.dat(N) ; do
   # -- don't extrap excitation
   (( Ep > E )) && extrap="" || extrap="--extrap"
 
-  print -- "Excitation: N,Ka,Kc->N',Ka',Kc': (${N},${Ka},${Kc}) -> (${Np},${Kap},${Kcp})"
+  (( quiet )) || print -- "Excitation: N,Ka,Kc->N',Ka',Kc': (${N},${Ka},${Kc}) -> (${Np},${Kap},${Kcp})"
   print -r -- "$input|$output|$extrap" >> "$jobfile"
   ((ntherm++))
 
@@ -163,7 +169,7 @@ parallel --colsep '\|' -j "$njobs" --halt soon,fail=1 '
   output={2}
   extrap={3}
 
-  print -r -- "Convolving $input -> $output"
+  (( $quiet )) || print -r -- "Convolving $input -> $output"
 
   thermal \
     -i "$input" \
@@ -174,15 +180,3 @@ parallel --colsep '\|' -j "$njobs" --halt soon,fail=1 '
     --num-extrap-energies=1000 \
     "$extrap"
 ' :::: "$jobfile"
-
-# cat "$jobfile" | xargs -P "${njobs}" -I{} zsh -c '
-#   IFS="|" read -r input output extrap <<< "{}"
-#   print -r -- "Convolving $input -> $output"
-#   thermal \
-#     -i "$input" \
-#     -o "$output" \
-#     --Ti=10 --Tf=10000 --nT=100 --input-energy-units=ev --input-xs-units=cm \
-#     --logx \
-#     --electron-energy-min=1e-8 \
-#     --num-extrap-energies=1000 "$extrap"
-# '
