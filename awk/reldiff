@@ -1,0 +1,89 @@
+#!/usr/bin/env -S awk -f
+
+##############################
+## Compare two numeric table files using a relative L2 difference
+#
+#  Usage:
+#
+#    reldiff [-v col=2 header=1] BASEFILE COMPFILE
+#
+#  Output:
+#
+#    err2 ref2 rel_L2 npoints
+#
+#  col=1 means use column 1
+#  col=2 means use column 2 (default)
+#  ...
+#
+#  header=0 means no  header to be printed in output
+#  header=1 means yes header to be printed in output (default)
+
+BEGIN {
+  col    = col ? col : 2
+  header = header ? header : 1
+
+  err2 = 0.0
+  ref2 = 0.0
+  n = 0
+  nbase=0
+  ncomp=0
+}
+
+ARGC != 3 {
+  print "Usage: reldiff_file.awk [-v col=2] BASEFILE COMPFILE" > "/dev/stderr"
+  exit 2
+}
+
+# -- read only the base file
+FNR == NR {
+
+
+  if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) { next }
+  if (NF < col) {
+    printf "ERROR: base file has fewer than %d columns on data line %d\n", col, nbase + 1 > "/dev/stderr"
+    exit 2
+  }
+
+  nbase++
+  base[nbase] = $col
+
+  next
+}
+
+# -- comparison file
+{
+
+  if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) { next }
+  if (NF < col) {
+    printf "ERROR: comparison file has fewer than %d columns on data line %d\n", col, ncomp + 1 > "/dev/stderr"
+    exit 2
+  }
+  ncomp++
+
+  if (ncomp > nbase) {
+    print "ERROR: comparison file has more lines than the base file !" > "/dev/stderr"
+    exit 2
+  }
+
+  diff = $col - base[ncomp]
+
+  err2 += diff * diff
+  ref2 += base[ncomp] * base[ncomp]
+  n++
+
+}
+
+END {
+  if(ncomp != nbase) {
+    printf "ERROR: different number of lines detected in basefile (%d) and compfile (%d)\n", nbase, ncomp > "/dev/stderr"
+    exit 2
+  }
+  if (header) { printf "# %14s %16s %16s %s\n", "ref²", "err²", "sqrt(err²/ref²)", "n" }
+  if(n==0) {
+    printf "%16.8e %16.8e %16s %d\n", ref2, err2, "NaN", n
+  } else if (ref2 > 0.0) {
+    printf "%16.8e %16.8e %16.8e %d\n", ref2, err2, sqrt(err2 / ref2), n
+  } else {
+    printf "%16.8e %16.8e %16s %d\n", ref2, err2, "NaN", n
+  }
+}
