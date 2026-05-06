@@ -19,8 +19,8 @@
 #  header=1 means yes header to be printed in output (default)
 
 BEGIN {
-  col    = col ? col : 2
-  header = header ? header : 1
+  if (col == "") { col = 2 }
+  if (header == "") { header = 1 }
 
   err2 = 0.0
   ref2 = 0.0
@@ -78,7 +78,7 @@ END {
     printf "ERROR: different number of lines detected in basefile (%d) and compfile (%d)\n", nbase, ncomp > "/dev/stderr"
     exit 2
   }
-  if (header) { printf "# %14s %16s %16s %s\n", "ref²", "err²", "sqrt(err²/ref²)", "n" }
+  if (header == 1) { printf "# %14s %16s %16s %s\n", "ref²", "err²", "sqrt(err²/ref²)", "n" }
   if(n==0) {
     printf "%16.8e %16.8e %16s %d\n", ref2, err2, "NaN", n
   } else if (ref2 > 0.0) {

@@ -1,0 +1,211 @@
+#!/usr/bin/env zsh
+
+PROGNAME="${0:t}"
+
+usage() {
+cat << help
+
+$PROGNAME
+
+    Directory relative differences.
+
+    Iterate through the files in the supplied directories BASE_DIR, DIR2, ... and do a file-by-file comparison
+    (assuming that they have the same names) of the files therein, determining the relative difference with the
+    respective file found in BASE_DIR, and the overall relative difference between all files of the directories.
+
+USAGE: $PROGNAME [OPTIONS] BASE_DIR DIR2 [ DIR3 [ DIR4 [...]]]
+
+
+REQUIRES:
+
+    - zsh of course
+    - my reldif awk script
+
+OPTIONS
+
+    -h, --help          show this message
+    -p, --pattern  PAT  the pattern to match with ZSH pattern matching
+    --noextra           if supplied, DIRX are not allowed to have extra files (also affected by pattern)
+    -c, --column   COL  the column in each file to be compared (default 2)
+    --printall          if supplied, print info for all files
+
+EXAMPLE
+
+    $PROGNAME -p 'Smat/*.dat' lmax?
+
+  It is important to note that PAT should not be expanded
+
+help
+}
+
+die() {
+  local message="$1"
+  print -u2 -- "$message"
+  exit 1
+}
+
+_collect_files() {
+  local dir="$1"
+  local pattern="$2"
+
+
+  dir="${dir%/}"
+
+  local -a files
+
+  if [[ -n "$pattern" ]] ; then
+    files=( "$dir"/${~pattern}(-.N) )
+  else
+    files=( "$dir"/**/*(-.N) )
+  fi
+
+  files=( "${files[@]#$dir/}" )
+
+  print -r -l -- "${files[@]}"
+}
+
+main() {
+
+  zmodload zsh/zutil || die "Could not load zsh/zutil" # for zparseopts
+  zmodload zsh/mathfunc || die "Could not load zsh/mathfunc" # for sqrt
+  zparseopts -D -E -F \
+    h=help -help=help \
+    -noextra=noextraopt \
+    c:=colopt -column:=colopt \
+    -printall=printallopt \
+    p:=patopt -pattern:=patopt || exit 1
+
+  # -- options
+  (( ${#help} )) && {usage; exit 0}
+  [[ "$#" -lt 2 ]] && die "Not enough directories supplied for comparison"
+  local pattern="" ; (( ${#patopt} ))     && pattern="${patopt[-1]}"
+  local noextra=0  ; (( ${#noextraopt} )) && noextra=1
+  local printall=0 ; (( ${#printallopt} )) && printall=1
+  local col=2      ; (( ${#colopt} ))     && col="${colopt[-1]}"
+  [[ "$col" == <1-> ]] || die "The target column ($col) must be a positive integer"
+
+  command -v reldiff > /dev/null || die 'reldiff not found on PATH'
+
+  # -- base directory is the first, compared directories are the rest
+  local BASEDIR="${1%/}" # remove trailing /
+  [[ -e "$BASEDIR" ]] || die "Base directory not found: $BASEDIR"
+  [[ -d "$BASEDIR" ]] || die "Base directory is not a directory: $BASEDIR"
+  shift
+  local i
+  local -a COMPDIRS=( "$@" )
+  for i in {1..${#COMPDIRS[@]}} ; do
+    COMPDIRS[$i]="${COMPDIRS[$i]%/}"
+  done
+
+  # -- print what we're going to do
+  print
+  print -r -- "  ${(l:99::=:)}"
+  print
+  print -- "  Base directory: $BASEDIR"
+  print
+  [[ -n "$pattern" ]] && print -- "  Pattern: $pattern"
+  print
+  print -r -- "  ${(l:99::=:)}"
+  print
+  local dir
+  for dir in "${COMPDIRS[@]}" ; do
+    print -- "    Comparing with: $dir"
+    [[ -e "$dir" ]] || die 'Directory not found !'
+    [[ -d "$dir" ]] || die "$dir"' is not a directory !'
+  done
+
+  # -- collect filenames
+  local -a BASEFILES
+  BASEFILES=( "${(@f)$(_collect_files "$BASEDIR" "$pattern")}" )
+
+  (( ${#BASEFILES} )) || die "No matching files !. No regular files or not matching files in $BASEDIR"
+
+  # -- check that we have all the files that we want in each dir (and possibly respect --noextra)
+  local -a COMPFILES
+  local file
+  for dir in "${COMPDIRS[@]}" ; do
+
+    for file in "${BASEFILES[@]}" ; do
+      [[ -f "$dir/$file" ]] || die "Missing files in $dir: $file"
+    done
+
+    # -- noextra
+    if (( noextra )) ; then
+      COMPFILES=( "${(@f)$(_collect_files "$dir" "$pattern")}" )
+      for file in "${COMPFILES[@]}" ; do
+        (( ${BASEFILES[(Ie)$file]} )) || die "Extra file found in $dir: $file"
+      done
+    fi
+
+  done
+
+  print
+  print -r -- "  ${(l:99::=:)}"
+
+  # -- compare files
+  for dir in "${COMPDIRS[@]}" ; do
+
+    local dref2=0.0
+    local derr2=0.0
+    local -i dnpts=0
+    local maxfile=""
+    local maxref2=0.0
+    local maxerr2=0.0
+    local maxrel=-1.0
+    local -i maxnpts=0
+
+    print
+    print -r -- "  $dir"
+
+    if (( printall )) ; then
+      print
+      printf "             %16s %16s %16s %8s   %s\n" "ref2" "err2" "rel_L2" "n" "file"
+      print -r -- "    ${(l:95::-:)}"
+    fi
+
+    for file in "${BASEFILES[@]}" ; do
+
+      res="$(reldiff -v col="$col" -v header=0 "$BASEDIR/$file" "$dir/$file")" || die "Failed to compare $BASEDIR/$file and $dir/$file"
+
+      # -- this file
+      local fref2="${res[(w)1]}"
+      local ferr2="${res[(w)2]}"
+      local frel="${res[(w)3]}"
+      local -i fnpts="${res[(w)4]}"
+
+      if (( frel > maxrel )) ; then
+        maxfile="$file"
+        maxref2="$fref2"
+        maxerr2="$ferr2"
+        maxrel="$frel"
+        maxnpts="$fnpts"
+      fi
+
+      (( printall )) && printf "             %16.8e %16.8e %16.8e %8d   %s \n" "$fref2" "$ferr2" "$frel" "$fnpts" "$file"
+
+      # -- accumulate in the directory
+      dref2=$(( dref2 += fref2 ))
+      derr2=$(( derr2 += ferr2 ))
+      dnpts=$(( dnpts += fnpts ))
+
+    done
+
+    (( printall )) && print -r -- "    ${(l:95::-:)}"
+
+    (( dref2 > 0 )) && local drel=$(( sqrt(derr2 / dref2) )) || local drel="NaN"
+
+    # print -r -- "    ${(l:85::-:)}"
+    print
+    printf "             %16s %16s %16s %8s   %s\n" "ref2" "err2" "rel_L2" "n" "file with biggest rel_L2"
+    print -r -- "    ${(l:95::-:)}"
+    printf "    MAX      %16.8e %16.8e %16.8e %8d   %s\n" "$maxref2" "$maxerr2" "$maxrel" "$maxnpts" "$maxfile"
+    printf "    TOTAL    %16.8e %16.8e %16.8e %8d\n"      "$dref2" "$derr2" "$drel" "$dnpts"
+    print
+    print -r -- "  ${(l:99::=:)}"
+
+
+  done
+
+}
+
+main "$@"
