@@ -1,11 +1,21 @@
 #!/usr/bin/env zsh
 
-PROGNAME="${0:t}"
+PROGRAM="${0:t}"
 
 DEFAULT_LIFETIMES="lifetimes.dat"
 DEFAULT_NJOBS="$(nproc)"
 DEFAULT_NMIN=""
 DEFAULT_NMAX=""
+DEFAULT_PARALLEL_OPTS=""
+DEFAULT_TI=10
+DEFAULT_TF=2000
+DEFAULT_NT=200
+DEFAULT_EUNITS=ev
+DEFAULT_XSUNITS=cm
+DEFAULT_EXTRAP=0
+DEFAULT_EMIN=1e-8
+DEFAULT_NE_EXTRAP=200
+DEFAULT_COMMENT_CHAR="#"
 
 die() {
   local message="$1"
@@ -16,7 +26,7 @@ die() {
 usage() {
   cat << help
 
-$PROGNAME
+$PROGRAM
 
     Parallelize the state-selected thermal convolution of several files in the format
 
@@ -24,7 +34,13 @@ $PROGNAME
 
 USAGE
 
-    $PROGNAME [OPTIONS] -i indir -o outdir
+    $PROGRAM [OPTIONS] -i indir -o outdir
+
+REQUIREMENTS
+
+    - my julia script 'thermal.jl' and the zsh wrapper 'thermal' on PATH
+    - my zsh script 'units' on PATH
+    - GNU parallel
 
 ARGUMENTS
 
@@ -33,11 +49,37 @@ ARGUMENTS
 
 OPTIONS
 
-    --nmin     NMIN         minimum value of N and Np (skips files with smaller N or Np; default is to not skip any)
-    --nmax     NMAX         maximum value of N and Np (skips files with larger  N or Np; default is to not skip any)
-    --njobs    NJOBS        number of jobs to run at once (defaults to the result of nproc)
-    --lifetimes LIFETIMES   the file containing channel information (default "lifetimes.dat")
-    -q, --quit              print less stuff to the screen
+    --nmin       NMIN            minimum value of N and Np (skips files with smaller N or Np; default is to not skip any)
+    --nmax       NMAX            maximum value of N and Np (skips files with larger  N or Np; default is to not skip any)
+    --njobs      NJOBS           number of jobs to run at once (defaults to the result of nproc: $(nproc))
+    --lifetimes  LIFETIMES       the file containing channel information (default $DEFAULT_LIFETIMES)
+    -q, --quiet                  print less stuff to the screen
+
+    --parallel   PARALLEL_OPTS   supply a string of extra options to be used by GNU parallel
+    --bar                        shortcut to pass "--bar" to GNU parallel
+    --eta                        shortcut to pass "--eta" to GNU parallel
+    --progress                   shortcut to pass "--progress" to GNU parallel
+
+OPTIONS (for thermal)
+
+    These options are passed to 'thermal'. Note that -i -o and --extrap are determined automatically
+
+    --Ti           TI            minimum temperature for kinetic rates (K); default: $DEFAULT_TI
+    --Tf           TI            maximum temperature for kinetic rates (K); default: $DEFAULT_TF
+    --nT           TI            number of temperatures for kinetic rates; default: $DEFAULT_NT
+    --eunits       EUNITS        units for input electron energies; default: $DEFAULT_EUNITS
+    --xsunits      XSUNITS       length units for input cross sections (cm for cm²); default: $DEFAULT_XSUNITS
+    --logx                       if supplied, use a logarithmic temperature grid (linear otherwise); default: disabled
+    --ne-extrap    NE_EXTRAP     number of energies between the minimum supplied energy and EMIN
+    --comment-char COMMENT_CHAR  the character representing a comment; default: $DEFAULT_COMMENT_CHAR
+    --emin         EMIN          minimum energy for the integration in E for each T. This is used even if --extrap
+                                 is not supplied, and should be below the threshold (unless the threshold is E=0)
+                                 if there are no points there. Same units as EUNITS. default: $DEFAULT_EMIN
+
+
+EXAMPLE
+
+    $PROGRAM -i Smat/singlet -o thermal --lifetimes singlet.channels --Ti 10 --Tf 1000 --logx --parallel '--bar --progress --eta'
 
 help
 }
@@ -68,7 +110,20 @@ zparseopts -D -E -F \
   -lifetimes:=lifetimes \
   o:=outdir -outdir:=outdir \
   q=quietopt -quiet=quietopt \
-  n:=njobs -njobs:=njobs
+  -eta=etaopt \
+  -bar=baropt \
+  -progress=progressopt \
+  -Ti:=Ti \
+  -Tf:=Tf \
+  -nT:=nT \
+  -eunits:=eunits \
+  -xsunits:=xsunits \
+  -logx=logx \
+  -emin:=emin \
+  -ne-extrap:=ne_extrap \
+  -comment-char:=comment_char\
+  -parallel:=parallel_opts \
+  n:=njobs -njobs:=njobs || {print -u2 "Try '$PROGRAM -h' for supported arguments" ; exit 1}
 
 (( "${#help[@]}" )) && {usage; exit 0}
 local argfail=0
@@ -79,7 +134,7 @@ for arg in indir outdir  ; do
 done
 (( argfail )) && {usage; die "Failed to parse required arguments"}
 # -- optional arguments
-for optarg in nmin nmax lifetimes njobs ; do
+for optarg in nmin nmax lifetimes njobs Ti Tf nT eunits xsunits emin ne_extrap comment_char parallel_opts ; do
   defvar="DEFAULT_${optarg:u}"
   val="$(_get_optional_arg "$optarg" "${(P)defvar}")" || {argfail=1; continue}
   printf -v "${optarg}" '%s' "$val"
@@ -87,18 +142,24 @@ done
 (( argfail )) && {usage; die "Failed to parse optional arguments"}
 (( "${#quietopt[@]}" )) && quiet=1 || quiet=0
 
-# -- export quiet to be visible by the subshell for parallel
+# -- export variables to be visible by the subshell for parallel
+thermal_opts=(
+  --Ti="$Ti"
+  --Tf="$Tf"
+  --nT="$nT"
+  --input-energy-units="$eunits"
+  --input-xs-units="$xsunits"
+  --electron-energy-min="$emin"
+  --num-extrap-energies="$ne_extrap"
+  )
+(( ${#logx[@]} ))   && thermal_opts+=(--logx)
+thermal_opts_str="${(j: :)${(@q)thermal_opts}}"
+thermal_opts_str+=" --comment-char $comment_char"
 export quiet
+export thermal_opts_str
 
 command -v parallel > /dev/null || die "GNU Parallel is not installed. Maybe install it ?"
-
-# echo nmin $nmin
-# echo nmax $nmax
-# echo lifetimes $lifetimes
-# echo indir $indir
-# echo outdir $outdir
-# echo njobs $njobs
-# exit
+command -v thermal > /dev/null || die "'thermal' is not on PATH"
 
 [[ -z "$indir" ]] && die "indir not defined"
 [[ -d "$indir" ]] || die "Input directory ("$indir") is not a directory"
@@ -163,8 +224,15 @@ for file in "${indir}"/*_*_*.*_*_*.dat(N) ; do
 done
 
 (( ntherm == 0 )) && die "No files were chosen for convoltution. Make sure that the input directory ($indir) is correct and that it has files in the proper format."
+(( "${#etaopt[@]}" )) && PARALLEL_OPTS+=(--eta)
+(( "${#baropt[@]}" )) && PARALLEL_OPTS+=(--bar)
+(( "${#progressopt[@]}" )) && PARALLEL_OPTS+=(--progress)
 
-parallel --colsep '\|' -j "$njobs" --halt soon,fail=1 '
+parallel_cmd=(parallel)
+[[ -n "$parallel_opts" ]] && parallel_cmd+=(${(z)PARALLEL_OPTS})
+parallel_cmd+=(--colsep '\|' -j "$njobs" --halt soon,fail=1)
+
+"${parallel_cmd[@]}" '
   input={1}
   output={2}
   extrap={3}
@@ -174,9 +242,6 @@ parallel --colsep '\|' -j "$njobs" --halt soon,fail=1 '
   thermal \
     -i "$input" \
     -o "$output" \
-    --Ti=10 --Tf=10000 --nT=100 --input-energy-units=ev --input-xs-units=cm \
-    --logx \
-    --electron-energy-min=1e-8 \
-    --num-extrap-energies=1000 \
+    ${(z)thermal_opts_str} \
     "$extrap"
 ' :::: "$jobfile"

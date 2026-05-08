@@ -24,10 +24,12 @@ REQUIRES:
 OPTIONS
 
     -h, --help          show this message
-    -p, --pattern  PAT  the pattern to match with ZSH pattern matching
+    -p, --pattern PAT   the pattern to match with ZSH pattern matching
     --noextra           if supplied, DIRX are not allowed to have extra files (also affected by pattern)
-    -c, --column   COL  the column in each file to be compared (default 2)
+    -c, --column  COL   the column in each file to be compared (default 2)
     --printall          if supplied, print info for all files
+    --nmax        NMAX  print the NMAX biggest differences. Defaults to 1, prints no MAX when set to 0,
+                        and prints all files when set to -1
 
 EXAMPLE
 
@@ -64,6 +66,43 @@ _collect_files() {
   print -r -l -- "${files[@]}"
 }
 
+_print_nmax() {
+  local -i nmax="$1"
+  (( nmax == 0 )) && return 0
+  shift
+  local -a file_results=( "$@" )
+  # local -a sorted=( "${(@on)file_results}" )
+  local -a sorted=( "${(@f)$(printf "%s\n" "${file_results[@]}" | sort -t $'\t' -k1,1g)}" )
+
+  local -i nfiles="${#sorted[@]}"
+  (( nfiles == 0 )) && return 0
+
+  local -i nshow=$nmax
+  (( nshow > nfiles )) && nshow="$nfiles"
+
+  local -i istart
+  (( nmax == -1 )) && istart=1 || istart=$(( nfiles - nshow + 1 ))
+
+  local irow
+  for irow in {$istart..$nfiles} ; do
+    local line="${sorted[$irow]}"
+    local -a fields=( "${(@ps:\t:)line}" ) # p makes \t tab, s to split on tab \t
+    local tref2="${fields[2]}"
+    local terr2="${fields[3]}"
+    local trel="${fields[4]}"
+    local -i tnpts="${fields[5]}"
+    local tfile="${fields[6]}"
+
+    local label="MAX"
+    (( irow != nfiles )) && label="${label} - $(( nfiles - irow ))"
+
+    printf "    %-8s %16.8e %16.8e %16.8e %8d   %s\n" "$label" "$tref2" "$terr2" "$trel" "$tnpts" "$tfile"
+  done
+
+  print -r -- "    ${(l:95::-:)}"
+
+}
+
 main() {
 
   zmodload zsh/zutil || die "Could not load zsh/zutil" # for zparseopts
@@ -73,6 +112,7 @@ main() {
     -noextra=noextraopt \
     c:=colopt -column:=colopt \
     -printall=printallopt \
+    -nmax:=nmaxopt \
     p:=patopt -pattern:=patopt || exit 1
 
   # -- options
@@ -83,6 +123,8 @@ main() {
   local printall=0 ; (( ${#printallopt} )) && printall=1
   local col=2      ; (( ${#colopt} ))     && col="${colopt[-1]}"
   [[ "$col" == <1-> ]] || die "The target column ($col) must be a positive integer"
+  local nmax=1     ; (( ${#nmaxopt} ))   && nmax="${nmaxopt[-1]}"
+  [[ "$nmax" -eq -1 || "$nmax" == <0-> ]] || die "nmax ("$nmax") must be greater than -1"
 
   command -v reldiff > /dev/null || die 'reldiff not found on PATH'
 
@@ -148,11 +190,13 @@ main() {
     local dref2=0.0
     local derr2=0.0
     local -i dnpts=0
-    local maxfile=""
-    local maxref2=0.0
-    local maxerr2=0.0
-    local maxrel=-1.0
-    local -i maxnpts=0
+    # local maxfile=""
+    # local maxref2=0.0
+    # local maxerr2=0.0
+    # local maxrel=-1.0
+    local -a file_results
+    file_results=()
+    # local -i maxnpts=0
 
     print
     print -r -- "  $dir"
@@ -173,13 +217,17 @@ main() {
       local frel="${res[(w)3]}"
       local -i fnpts="${res[(w)4]}"
 
-      if (( frel > maxrel )) ; then
-        maxfile="$file"
-        maxref2="$fref2"
-        maxerr2="$ferr2"
-        maxrel="$frel"
-        maxnpts="$fnpts"
-      fi
+      # -- add the results to an array so that later we can prin the max N results
+      local fres="$(printf "%16.8e\t%s\t%s\t%s\t%d\t%s" "$frel" "$fref2" "$ferr2" "$frel" "$fnpts" "$file")"
+      file_results+=("$fres")
+
+      # if (( frel > maxrel )) ; then
+      #   maxfile="$file"
+      #   maxref2="$fref2"
+      #   maxerr2="$ferr2"
+      #   maxrel="$frel"
+      #   maxnpts="$fnpts"
+      # fi
 
       (( printall )) && printf "             %16.8e %16.8e %16.8e %8d   %s \n" "$fref2" "$ferr2" "$frel" "$fnpts" "$file"
 
@@ -198,7 +246,8 @@ main() {
     print
     printf "             %16s %16s %16s %8s   %s\n" "ref2" "err2" "rel_L2" "n" "file with biggest rel_L2"
     print -r -- "    ${(l:95::-:)}"
-    printf "    MAX      %16.8e %16.8e %16.8e %8d   %s\n" "$maxref2" "$maxerr2" "$maxrel" "$maxnpts" "$maxfile"
+    _print_nmax "$nmax" "${file_results[@]}"
+    # printf "    MAX      %16.8e %16.8e %16.8e %8d   %s\n" "$maxref2" "$maxerr2" "$maxrel" "$maxnpts" "$maxfile"
     printf "    TOTAL    %16.8e %16.8e %16.8e %8d\n"      "$dref2" "$derr2" "$drel" "$dnpts"
     print
     print -r -- "  ${(l:99::=:)}"

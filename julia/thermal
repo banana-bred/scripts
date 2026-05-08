@@ -191,7 +191,7 @@ main() {
 				inputEUnits="${1#*=}"
 				;;
 
-			--comment-char )
+			--comment-char)
 				[ "$2" ] && comment="${2}" && shift || die 'ERROR: "--comment-char" requires a non-empty option argument.'
 				;;
 			--comment-char=)
