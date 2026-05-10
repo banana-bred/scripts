@@ -395,7 +395,7 @@ main() {
     # (( ${#degenStatesOpt} )) && DEGEN_STATES="$(_normalizeToCsv "$degenStatesOpt[-1]")" && _addOpt DEGEN_STATES "$DEGEN_STATES"
     (( ${#rpropOpt} ))       && RPROP="${rpropOpt[-1]}"                                 && _addOpt RPROP "$RPROP" || RPROP=0
     (( ${#rpropOpt} ))       && DO_RPROP=1 || DO_RPROP=0
-    (( ${#rpropOpt} )) && {(( ${#rpropOpt} && ${#nintervOpt} )) && NINTERV="${nintervOpt[-1]}" && _addOpt NINTERV "$NINTERV" || _die "Must define NINTERV if propagating"} || NINTERV=0
+    (( ${#rpropOpt} )) && { (( ${#rpropOpt} && ${#nintervOpt} )) && NINTERV="${nintervOpt[-1]}" && _addOpt NINTERV "$NINTERV" || _die "Must define NINTERV if propagating" } || NINTERV=0
   fi
 
   # -- fill the SPIN_IRREP script template
@@ -490,6 +490,7 @@ main() {
       NUMELEC="$numElecStates" \
       POINT_GROUP="${point_group}" \
       DO_RPROP="$DO_RPROP" \
+      NINTERV="$NINTERV" \
       NCHAN="$numChans" \
       "${OPTARGPAIRS[@]}"   # <-- also fill in optional arguments here
       # SPINMULT="$spinmult" \
