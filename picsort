@@ -1,0 +1,163 @@
+#!/usr/bin/env zsh
+
+PROGRAM="${0:t}"
+DEST_ROOT=${HOME}/Pictures
+DRY_RUN=0
+NULL=$'\0' # for string separation
+
+usage() {
+  cat << help
+
+$PROGRAM
+
+    Get all .JPG,.NEF,.XMP files in supplied directories, organized by date
+
+USAGE
+
+    $PROGRAM [OPTIONS] files
+
+OPTIONS
+
+    -h, --help             show this message
+    -d, --dest  DEST_ROOT  overrides DEST_ROOT; default: $DEST_ROOT
+    --dry-run              do a dry run (print what would be done, but don't do it)
+
+EXAMPLE
+
+    picsort Folder{1,2}/**/*
+
+help
+}
+
+die() {
+  local message="$1"
+  [[ -n "$message" ]] && print -u2 -- "ERROR: $message"
+  exit 1
+}
+
+_get_date() {
+  local file="$1"
+  [[ -z "$file" ]] && die "Can't get the date of an empty string."
+  print -r -- "${file_dates[$file]}"
+}
+
+_get_base_filename() {
+  ## gets base filename and stips extensions
+  local file="${1:t}"
+  file="${file%.[xX][mM][pP]}" # side car files are like filename.JPG.xmp
+  file="${file%.*}"
+  print -r -- "$file"
+}
+
+_move_file() {
+  local src="$1" y="$2" m="$3" d="$4"
+  local dir="${DEST_ROOT}/${y}/${m}/${d}"
+  local dst="${dir}/${src:t}"
+  [[ -e "$dst" ]] && { print -u2 -- "$dst exists, skipping"; return 1 }
+  (( DRY_RUN )) && { print -- "[dry] $src -> $dst"; return 0 }
+  print -- "$src -> $dst"
+  mkdir -p -- "$dir"
+  mv -- "$src" "$dst"
+  print -- "$src -> $dst"
+}
+
+_date_priority() {
+  ## multiple files for one group, so which one sets the date ?
+  ## set date priority: lowest=best
+  local lfile="${1:l}"
+  [[ -z "$lfile" ]] && die "Can't get the date priority of nothing \!"
+  case "$lfile" in
+    *.nef|*.cr{2,3}|*.arw|*.raf|*.rw2|*.orf|*.pef|*.dng) print 1 ;; # raw; primary source
+    *.jpg|*.jpeg)                                    print 2 ;;
+    *.tif|*.tiff|*.png|*.heic|*.heif|*.mov|*.MOV)    print 3 ;;
+    *.xmp)                                           print 9 ;; # darktable edits; last resort
+    *)                                               print 5 ;;
+  esac
+}
+
+_pick_primary_file() {
+  ## given a list of files, return the one with the LOWEST date priority (most important)
+  local best_file="$1"
+  local best_prio=$(_date_priority "$best_file")
+  shift
+
+  for f in "$@" ; do
+    local prio=$(_date_priority "$f")
+    (( prio < best_prio )) && { best_file="$f"; best_prio="$prio" }
+  done
+
+  print -r -- "$best_file"
+}
+
+zmodload zsh/zutil || die "Failed to load zsh/zutils"
+
+zparseopts -D -E -F \
+  -dry-run=dry_run \
+  d:=dest -dest:=dest \
+  h=help -help=help || die "Failed to parse arguments !"
+
+(( "${#help}" )) && { usage; exit 0 }
+DRY_RUN="${#dry_run}"
+[[ -n "${dest[2]}" ]] && DEST_ROOT="${dest[2]}"
+TIMEOUT_DIR="${DEST_ROOT}/timeout"
+mkdir -p "$TIMEOUT_DIR"
+
+(( $# == 0 )) && { die 'No files given !' }
+command -v exiftool >/dev/null || die "Exiftool not found on PATH"
+
+# -- absolute filepaths for all script arguments
+typeset -a absolute_filepaths=()
+for file in "$@" ; do
+  [[ -e "$file" ]] || {print -u2 -- "missing $file"; continue}
+  absolute_filepaths+=( "${file:A}" )
+done
+set -- "${absolute_filepaths[@]}"
+
+typeset -A filegroups file_dates
+
+print -n "Reading file metadata... "
+output=$(exiftool -fast2 -q -q -s3 -T -m -api=RequestAll 0 -filepath -d '%Y %B %d' -DateTimeOriginal -CreateDate "$@")
+print 'done !'
+
+typeset -a lines=( ${(f)output} )
+
+for line in $lines; do
+  typeset -a fields=( ${(@ps:\t:)line} )
+  filepath="${fields[1]}"
+  date_time_original="${fields[2]}"
+  create_date="${fields[3]}"
+  if [[ -n "$date_time_original" && "$date_time_original" != "-" ]] ; then
+    file_dates[$filepath]="$date_time_original"
+  elif [[ -n "$create_date" && "$create_date" != "-" ]] ; then
+    file_dates[$filepath]="$create_date"
+  fi
+done
+
+# -- group filenames
+for file in "$@" ; do
+  [[ -e "$file" ]] || { print -u2 -- "missing: $file"; continue }
+  key="$(_get_base_filename "$file")"
+  filegroups[$key]+="${file}${NULL}"
+done
+
+# -- expand all keys in groups associative array; process each group
+for key in ${(k)filegroups} ; do
+
+  # -- split the strings on null bytes (0)
+  typeset -a files=( ${(0)filegroups[$key]} )
+
+  primary="$(_pick_primary_file "${files[@]}")"
+
+  ymd=$(_get_date "$primary")
+
+  typeset -a parts=( ${=ymd} )
+  (( ${#parts} < 3 )) && { print -u2 -- "No date for group '$key' (tried '$primary'); skipping ${#files} file(s)" ; continue 1}
+
+  for f in "${files[@]}" ; do
+    y="${parts[1]}"
+    m="${parts[2]}"
+    d="${parts[3]}"
+    _move_file "$f" "$y" "$m" "$d"
+  done
+
+done
