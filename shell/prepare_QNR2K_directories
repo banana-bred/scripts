@@ -110,7 +110,12 @@ OPTIONS
   [--GS  GROUND_STATE]         Target state chosen as "0 of Egrid".
   [--FOGS]                     Force Open Ground State. If present, sets OPT1 to 1 for ground state
                                channels (n=GROUND_STATE)
-
+  [--PG POINT_GROUP]           The point group of the target calculation. Use this in case it's not automatically
+                               detected, or to override (for whatever reason) the automatically detected point group
+  [--TC TARGET_CHARGE]         The charge of the target. Use this as an override for the automatic detection in case
+                               SWINTERF outputs and model file backups are not available.
+  [--BS BOX_SIZE]              The R-matrix box size. Use this as an override for the automatic detection in case
+                               RSOLVE outputs and model file backups are not available.
 
 HELP
   # [--DS  DEGEN_STATES]         Array of the "true" value of electronic states, taking degeneracy into account.
@@ -284,6 +289,13 @@ _fillTemplate() {
   mv "$tmp" "$filename"
 }
 
+_modelValue() {
+  # -- get values from keys in model.pl file, which is formatted as 'KEY', 'VAL'
+  emulate -L zsh
+  [[ -e "$1" ]] || return 1
+  sed -n "s/^[[:space:]]*'$2',[[:space:]]*\([^#]*\).*/\1/p" "$1" | head -n1 | sed 's/[[:space:],]*$//; s/["'"'"']//g'
+}
+
 main() {
 
   emulate -L zsh
@@ -291,7 +303,8 @@ main() {
 
   # -- parse options
   local -a Help basedirOpt forceOpt fillOpt existingOpt interactiveOpt
-  local -a eloOpt ehiOpt estepSizeOpt etypeOpt groundStateOpt degenStatesOpt rpropOpt nesegOpt fogsOpt
+  local -a eloOpt ehiOpt estepSizeOpt etypeOpt groundStateOpt degenStatesOpt rpropOpt nesegOpt \
+           fogsOpt pgOpt boxSizeOpt targChargeOpt
   zparseopts -E -D \
     h=Help -help=Help \
     s=symlinkOpt -symlink=symlinkOpt \
@@ -309,7 +322,10 @@ main() {
     -ET:=etypeOpt \
     -GS:=groundStateOpt \
     -DS:=degenStatesOpt \
-    -FOGS=fogsOpt
+    -FOGS=fogsOpt \
+    -PG:=pgOpt \
+    -BS:=boxSizeOpt \
+    -TC:=targChargeOpt
 
   (( "${#Help}" )) && {_usage; return 0}
 
@@ -319,12 +335,15 @@ main() {
   (( ${#basedirOpt} )) && basedir="${basedirOpt[-1]}"
 
   # -- flags
-  local force=0       ; (( ${#forceOpt} ))       && force=1
-  local fogs=0        ; (( ${#fogsOpt} ))        && fogs=1
-  local symlink=0     ; (( ${#symlinkOpt} ))     && symlink=1
-  local existing=0    ; (( ${#existingOpt} ))    && existing=1
-  local fill=0        ; (( ${#fillOpt} ))        && fill=1
-  local interactive=0 ; (( ${#interactiveOpt} )) && interactive=1
+  local force=0             ; (( ${#forceOpt} ))       && force=1
+  local fogs=0              ; (( ${#fogsOpt} ))        && fogs=1
+  local symlink=0           ; (( ${#symlinkOpt} ))     && symlink=1
+  local existing=0          ; (( ${#existingOpt} ))    && existing=1
+  local fill=0              ; (( ${#fillOpt} ))        && fill=1
+  local interactive=0       ; (( ${#interactiveOpt} )) && interactive=1
+  local pg_manual=""        ; (( ${#pgOpt} ))          && pg_manual="${pgOpt[-1]}"
+  local boxSizeManual=""    ; (( ${#boxSizeOpt} ))     && boxSizeManual="${boxSizeOpt[-1]}"
+  local targChargeManual="" ; (( ${#targChargeOpt} ))  && targChargeManual="${targChargeOpt[-1]}"
 
   # -- copy templates into outputDir unless we want to use the existing directory
   (( existing )) || _copyTemplates "$force" "$symlink" "$basedir"
@@ -447,17 +466,22 @@ main() {
 
   # -- fill the SPIN_IRREP script template
   typeset -i istart="$GEOM_MIN"
-  local channelFiles=( "$outputDir"/collected_scattering_data/channels/channels.geom"${istart}"*(N) )
-  local symmetries=( ${channelFiles#*.geom1.} ) # 1A1, 1A2, .., 3A1, 3A2 ..
+  # local channelFiles=( "$outputDir"/collected_scattering_data/channels/channels.geom"${istart}"*(N) )
+  local channelFiles=( "$outputDir"/collected_scattering_data/channels/channels.geom"${istart}".*(N) )
+  (( ${#channelFiles} )) || _die "No channel files found for geom${istart}"
+  local symmetries=( ${${channelFiles:t}#channels.geom${istart}.} ) # singlet.A1, triplet.B2, ...
   for symm in $symmetries ; do
 
-    local spinmult=${symm%%[^0-9]*}
-    local irrep=${symm#$spinmult}
-    local sword="${_SWORD[$spinmult]}"
+    local sword="${symm%%.*}"
+    local irrep="${symm#*.}"
+    # local spinmult="${(k)_SWORD[(r)$sword]}"
+    # [[ -n "$spinmult" ]] || _die "Unknown spin multiplicity '$sword' in '$symm'"
+
 
     # -- given an irrep and spinmult, fill in the SPIN_IRREP template
     local template="${outputDir}/SPIN_IRREP"
-    local filename="${outputDir}/${spinmult}${irrep}"
+    # local filename="${outputDir}/${spinmult}${irrep}"
+    local filename="${outputDir}/${symm}"
     cp "$template" "$filename"
     _fillTemplate "$filename" \
       RUN_DIRECTORY="${outputDir}" \
@@ -472,29 +496,37 @@ main() {
     local neseg_str=""
     (( ETYPE == 4 )) && neseg_str=".NESEG"
     local template="${outputDir}/input/SPIN_IRREP${neseg_str}.init"
-    local filename="${outputDir}/input/${spinmult}${irrep}.init"
 
-    # -- determine the POINT_GROUP from UKRmol+ output
+    # -- determine the POINT_GROUP
+    local point_group="$pg_manual"
     local mainLogFile="${ukrmolDir}/logs/main.log"
-    [[ -e "$mainLogFile" ]] || _die "The main.log file does not exist."
-    local point_group="$(awk '/^Symmetry / {print $2; exit}' "$mainLogFile")"
+    local modelFile="${ukrmolDir}/scripts_backup/model.pl"
+    [[ -z "$point_group" && -e "$mainLogFile" ]] && point_group="$(awk '/^Symmetry / {print $2; exit}' "$mainLogFile")"
+    [[ -z "$point_group" ]] && point_group="$(_modelValue "$modelFile" symmetry)"
+    if [[ -z "$point_group" ]] ;  then
+      case "$irrep" in
+        A1|A2|B1|B2)             point_group=C2v ;;
+        Ap|App)                  point_group=Cs  ;;
+        B1u|B1g|B2u|B2g|B3u|B3g) point_group=D2h ;;
+      esac
+    fi
+    [[ -n "$point_group" ]] || _die "Could not determine point group. Please supply it with --PG"
 
-    # -- determine the box size from UKRmol+ output
-    # local rsolveOutFile="${ukrmolDir}/geom1/outputs/scattering.rsolve.${sword}.${irrep}.out"
-    local rsolveOutFile="${ukrmolDir}/geom"${istart}"/outputs/scattering.rsolve.${irrep}.out"
-    [[ -e "$rsolveOutFile" ]] || _die "The output file for RSOLVE (${rsolveOutFile}) does not exist."
-    local rmatRadius="$(awk '/R-matrix radius/{print $NF; exit}' "${rsolveOutFile}")"
-    unset rsolveOutFile
+    # -- determine the box size
+    local rmatRadius="$boxSizeManual"
+    local rsolveOutFile="${ukrmolDir}/geom${istart}/outputs/scattering.rsolve.${symm}.out"
+    [[ -z "$rmatRadius" && -e "$rsolveOutFile" ]] && rmatRadius="$(awk '/R-matrix radius/{print $NF; exit}' "$rsolveOutFile")"
+    [[ -z "$rmatRadius" ]] && rmatRadius="$(_modelValue "$modelFile" rmatrix_radius)"
+    [[ -n "$rmatRadius" ]] || _die "Could not determine box size. Please supply it with --BS"
 
     # -- determine target charge
-    local swinterfOutFile="${ukrmolDir}/geom"${istart}"/outputs/scattering.swinterf.${irrep}.out"
-    # local swinterfOutFile="${ukrmolDir}/geom1/outputs/scattering.swinterf.${sword}.${irrep}.out"
-    [[ -e "$swinterfOutFile" ]] || _die "The output file for SWINTERF (${swinterfOutFile}) does not exist."
-    local targetCharge="$(awk '/Residual charge on system/{print $NF; exit}' "$swinterfOutFile")"
-    unset swinterfOutFile
+    local targetCharge="$targChargeManual"
+    local swinterfOutFile="${ukrmolDir}/geom${istart}/outputs/scattering.swinterf.${symm}.out"
+    [[ -z "$targetCharge" && -e "$swinterfOutFile" ]] && targetCharge="$(awk '/Residual charge on system/{print $NF; exit}' "$swinterfOutFile")"
+    [[ -n "$targetCharge" ]] || _die "Could not determine target charge. Please supply it with --TC"
 
     # -- determine the channels and number of electronic states
-    local channelFile="${outputDir}"/collected_scattering_data/channels/channels.geom"${istart}"."${irrep}"
+    local channelFile="${outputDir}"/collected_scattering_data/channels/channels.geom"${istart}"."${symm}"
     # -- read channels file on separate file descriptor
     exec {funit}<"$channelFile"
     # -- skip 2 lines
@@ -525,13 +557,13 @@ main() {
     [[ $RPROP == ([-+])#<-> ]] && RPROP="${RPROP}.0"
 
     # -- fill the SPIN_IRREP.init template with non-channel info
-    local filename="${outputDir}/input/${spinmult}${irrep}.init"
+    local filename="${outputDir}/input/${symm}.init"
     cp "$template" "$filename"
     _fillTemplate "${filename}" \
       UKRMOL_DIR="${outputDir}/" \
       NDIGITS="$GEOM_NDIGITS" \
       SPINMULT="${_SWORD[$spinmult]}" \
-      IRREP="$irrep" \
+      IRREP="$symm" \
       BOX_SIZE="$rmatRadius" \
       RPROP="$RPROP" \
       Z="$targetCharge" \

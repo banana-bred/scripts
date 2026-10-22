@@ -19,12 +19,10 @@ if [[ $1 == --run-item ]]; then
   cd output || exit 1
   mkdir -p all
   for f in "$item"/output/*.kmat(N); do
-    basef="${f:t}"
-    spinmult="${${basef#*.}%%.*}"   # singlet  -> names[singlet]=1
-    sym="${basef#*.*.}"             # A1_R2K.kmat
-    sym="${sym%%_*}"                # A1
-    newf="${names[$spinmult]}${sym}.kmat"   # 1A1.kmat
-    cp -- "$f" "all/${newf}"
+    basef="${f:t}"            # N_.spinmult.irrep_R2K.kmat
+    geom="${basef%%_*}"       # N
+    sym="${${basef#*_.}%%_*}" # spinmult.irrep
+    cp -- "$f" "all/K-matrix.geom${geom}.${sym}" # all/K-matrix.geomN.spinmult.irrep
   done
   exit 0
 fi
@@ -107,4 +105,5 @@ for dir in $dirs ; do
   for item in $dir/*let.??*(N) ; do
     print -r -- "$dir"$'\t'"${item:t}"
   done
-done | parallel -j "$JOBS" --colsep '\t' zsh "$self" --run-item {1} {2}
+done | tee /dev/stderr | parallel -j "$JOBS" --colsep '\t' zsh "$self" --run-item {1} {2}
+# done | parallel -j "$JOBS" --colsep '\t' zsh "$self" --run-item {1} {2}

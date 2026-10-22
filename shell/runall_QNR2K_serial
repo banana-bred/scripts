@@ -23,12 +23,10 @@ for dir in ${=all} ; do
     cd output
     mkdir -p all
     for f in *let.??/output/*.kmat ; do
-      basef="${f:t}"
-      spinmult="${${basef#*.}%%.*}"  # 1 from n_.singlet.A1_R2K.kmat
-      sym="${basef#*.*.}"  # A1_R2K.kmat
-      sym="${sym%%_*}" # A1
-      newf="${names[$spinmult]}${sym}.kmat" #1A1.kmat
-      cp -- "$f" "all/${newf}"
+    basef="${f:t}"            # N_.spinmult.irrep_R2K.kmat
+    geom="${basef%%_*}"       # N
+    sym="${${basef#*_.}%%_*}" # spinmult.irrep
+    cp -- "$f" "all/K-matrix.geom${geom}.${sym}" # all/K-matrix.geomN.spinmult.irrep
     done
     cd ..
   done
