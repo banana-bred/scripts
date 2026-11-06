@@ -390,7 +390,7 @@ main() {
   IFS=" " read rowTemplate < <(tail -n 1 "$geomTemplate")
   header="${headerTemplate//"<<NGEOM>>"/$NGEOMS}"
   print -r -- "$header" > "$geomsFile"
-  typeset -i -Z "$GEOM_NDIGITS" iR=0
+  typeset -i iR=0
   for R in $GEOMS ; do
     ((iR++))
     row="${rowTemplate//"<<I>>"/$iR}"
