@@ -1,0 +1,111 @@
+#!/bin/sh
+
+clamp=0
+logx=0
+logy=0
+add=0
+program="$(basename "$0")"
+
+usage() {
+
+  cat <<help
+
+$program
+
+  Given a pair of data files in the format
+
+    x  y1 y2 ...
+    .. .. .. ...
+
+  print the second's  data that is interpolated onto the first's grid
+
+USAGE
+
+  $program OPTIONS file1.dat file2.dat
+
+OPTIONS
+
+  -h,--help  show this message
+  -c         if present, clamp to the master grid
+  --logx     interpolate in log(x)
+  --logy     interpolate in log(y)
+  --logxy    interpolate in log(x) and log(y)
+  --add      print file1 + interpolated file2. missing columns count as 0
+
+help
+}
+
+die() {
+  usage >&2
+  echo "ERROR: $1" >&2
+  exit 1
+}
+
+
+while [ $# -gt 0 ] ; do
+  case "$1" in
+    -h|--help) usage ; exit 0 ;;
+    -c)       clamp=1 ;;
+    --logx)   logx=1 ;;
+    --logy)   logy=1 ;;
+    --logxy)  logx=1; logy=1;;
+    --add)    add=1 ;;
+    --)       shift; break ;;
+    -?*)      die "Unknown option: $1" ;;
+    *)        break ;;
+  esac
+  shift
+done
+[  $# -eq 2 ] || die "$program accepts exactly two files"
+
+exec awk -v clamp="$clamp" -v logx="$logx" -v logy="$logy" -v add="$add" '
+BEGIN { CONVFMT = OFMT = "%.10g" }
+/^[ \t]*(#|$)/ { next }
+FNR == NR {
+    m++
+    gx[m] = $1
+    mf[m] = NF
+    for (j=2; j <= NF; j++) my[m,j] = $j
+    next
+}
+{
+  n++
+  x[n] = $1
+  nc = NF
+  for (j=2; j <= NF; j++) y[n,j] = $j
+}
+END {
+  p = 1
+  for (i=1; i<=m; i++) {
+   while (p < n-1 && x[p+1] < gx[i]) p++
+   a = p
+   b = (n>1) ? a+1 : a
+   g = gx[i]
+   if (b==a)
+     t = 0
+   else if (logx && x[a] > 0 && x[b] > 0 && g > 0)
+     t = log(g / x[a]) / log(x[b]  / x[a])
+   else
+     t = (g-x[a]) / (x[b] - x[a])
+   if (clamp) {
+     if (t<0) t = 0
+     if (t>1) t=1
+   }
+   for  (j=2; j<= nc; j++) {
+     ya = y[a,j]
+     yb = y[b,j]
+     if (logy && ya > 0 && yb > 0) { v[j] = ya * exp(t*log(yb / ya)) }
+     else { v[j] = ya + t* (yb-ya) }
+   }
+   out = g
+   if  (add) {
+     last = (mf[i] > nc) ? mf[i] : nc
+     for (j=2;j<= last; j++)
+       out = out OFS ((j <= mf[i] ? my[i,j] : 0) + (j <= nc ? v[j] : 0))
+   } else {
+       for (j=2; j <= nc ; j++) out = out OFS v[j]
+   }
+   print out
+  }
+}
+' "$@"
