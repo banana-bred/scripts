@@ -1,0 +1,85 @@
+#!/bin/bash
+
+PROGRAM="$(basename "$0")"
+verbose=0
+
+usage() {
+
+  cat <<help
+
+$PROGRAM
+
+    Get per-run timings of a UKRmol-scripts run entirely from file modification times
+
+USAGE
+
+    $PROGRAM [OPTIONS] RUN_DIR [RUN_DIR...]
+
+OPTIONS
+
+    -h,--help       print this helpful message
+    -v,--verbose    talk more
+
+help
+}
+
+die() {
+  usage >&2
+  echo "ERROR: $1" >&2
+  exit 1
+}
+
+verbose=0
+while [ $# -gt 0 ] ; do
+  case "$1" in
+    -h|--help)    usage ; exit 0 ;;
+    -v|--verbose) verbose=1 ;;
+    --)           shift; break ;;
+    -?*)          die "Unknown option: $1" ;;
+    *)            break ;;
+  esac
+  shift
+done
+
+(( $# )) || die "Gotta provide at least one directory"
+
+for run in "$@" ; do
+
+  run="${run%/}"
+  [[ -d "$run" ]] || { echo "skipping $run because it's not a directory" >&2; continue;  }
+  echo " ================================================================= "
+  echo "${run##*/}"
+  echo " ================================================================= "
+
+  for out in "${run}"/geom*/outputs/*.out ; do
+    [[ -e "$out" ]] || continue
+    base="${out##*/}"
+    base="${base%.out}" # scattering.scatci.singlet.A1
+    geomdir="${out%/outputs/*}"
+    geom="${geomdir##*/}" # geom1
+    # -- try input with and without .inp extension
+    inp="${geomdir}/inputs/${base}.inp" ; [[ -e "$inp" ]] || inp="${geomdir}/inputs/${base}"
+    [[ -e "$inp" ]] || continue
+    progname="$(sed -E 's/\.(singlet|doublet|triplet|quartet|quintet)(\..*)?$//' <<< "$base")"
+    printf '%s\t%s\t%s\t%d\t%d\n' "$geom" "$base" "$progname" "$(stat -c %Y "$inp")" "$(stat -c %Y "$out")"
+  done | sort -t$'\t' -k4,4n | awk -F'\t' -v v="${verbose}" '
+    {
+      d = $5 - $4
+      if (d<0) d=0
+        if (!($3 in tot)) order[++k] = $3
+        tot[$3] += d
+        n[$3]++
+        if (v) printf "%-8s %-40s %8d s\n", $1, $2, d
+        if (min == "" || $4 < min) min = $4
+        if ($5 > max) max = $5
+    }
+  END {
+    if (!k) { print "  no matching input/outputs found"; exit }
+    if (v) print ""
+      printf "%-30s %5s %10s\n", "program", "runs", "total"
+    for (i=1; i<=k; i++)
+      printf "%-30s %5d %8d s  (%6.1f min)\n", order[i], n[order[i]], tot[order[i]], tot[order[i]] / 60
+    printf "\n  first start -->  last end: %d s (%.2f min)\n", max - min, (max - min) / 60
+  } '
+
+done
