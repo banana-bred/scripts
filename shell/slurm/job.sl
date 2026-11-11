@@ -58,6 +58,10 @@ module unload cray-libsci
 source /soft/RH9/2025032/lomc/ukrmolenv
 module load atomic_simu/lomc-molpro/2025.4
 module list
+# -- greedy molpro wants to start itself on all tasks >:c
+#    Make all `srun`s take `exact`ly the cores it asks for
+export MOLPRO_OPTIONS="-n ${UKR_RANKS}"
+export SLURM_EXACT=1
 
 export TMPDIR="$LOCAL_WORK_DIR"/tmp
 mkdir -p "$TMPDIR"
