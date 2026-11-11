@@ -1,0 +1,192 @@
+#!/bin/bash
+
+########################################################################
+#  Submit a UKRmol+ scripts run
+########################################################################
+
+PROGRAM="$(basename "$0")"
+
+# -- these are defaults that can be changed here or overwritten when invoked in a shell
+#    See usage for more details
+jobfile=scripts/job.sl
+parallel_geoms=1
+parallel_syms=1
+ranks=16
+threads=1
+modelfile=model.pl
+dirfile=dirs.pl
+configfile=config.pl
+geomfile=geometry.pl
+mainfile=main.pl
+walltime=02:00:00
+partition=tcourt
+mempercpu=3500M
+email=""
+name=""
+norun=0
+
+usage() {
+  cat << help
+
+$PROGRAM
+
+    Submit a UKRmol-Scripts calculation on a system managed by Slurm.
+    Slurm resources are computed from the options as
+
+      tasks         = geoms × max(sym, 1) × ranks  [because sym can be 0]
+      cpus-per-task = threads
+
+INVOKAGE
+
+    $PROGRAM [OPTIONS]
+
+OPTIONS
+
+    --option            ARG    does                                          [default (or value when -h invoked)]
+    =============================================================================================================
+    -h,--help                  print this nice helpful message
+    -j,--job            FILE   the slurm job file to run
+    -g,--parallel-geom  N      number of geometries to run at the same time  [$parallel_geoms]
+    -r,--ranks          N      number of  MPI ranks per running geometry     [$ranks]
+    -t,--threads        N      number of  cores per MPI rank                 [$threads]
+    -p,--partition      NAME   the partition on which to run the job         [$partition]
+    -s,--parallel-sym   N      number of symmetries to run at the same time  [$parallel_syms]
+                               (0 means one MPI-SCATCI run for all symmetries)
+       --model          FILE   the perl model.pl file                        [$modelfile]
+       --config         FILE   the perl config.pl file template              [$configfile]
+       --dir            FILE   the perl dirs.pl file                         [$dirfile]
+       --geometry       FILE   the perl geometry.pl file                     [$geomfile]
+       --main           FILE   the perl main.pl file                         [$mainfile]
+       --time           T      wall-time limit                               [$walltime]
+       --mem-per-cpu    MEM    memory allotted per core                      [$mempercpu]
+       --name           NAME   the job name                                  [noName.g<G>.s<S>.r<R>.t<T>]
+       --email          ADDR   send emails to this address                   [${email:-from job file}]
+       --norun                 prints the sbatch command but doesn't actully
+                               do anything else
+
+EXAMPLES
+
+    $PROGRAM -r 1       #  1 geometry   at a time, legacy scatci/rsolve (  1 core )
+    $PROGRAM -r 1 -t 16 #  1 geometry   at a time, legacy scatci/rsolve ( 16 cores when possible, otherwise 1 core when nonparallel code)
+    $PROGRAM -r 2       #  1 geometry   at a time,      with  2 ranks   (  2 cores)
+    $PROGRAM -r 16      #  1 geometry   at a time,      with 16 ranks   ( 16 cores)
+    $PROGRAM -g 6  -r 7 #  6 geometries at a time, each with  7 ranks   ( 42 cores)
+    $PROGRAM -g 26 -r 7 # 26 geometries at a time, each with  7 ranks   (182 cores)
+
+Good luck out there
+
+help
+}
+
+die() {
+  echo "$PROGRAM ERROR: $*" >&2
+  echo "$PROGRAM -h for help" >&2
+  exit 1
+}
+
+toMB() {
+  local number="${1%[KkMmGgTt]}"
+  local unit="${1##*[0-9]}"
+  [[ "$number" =~ ^[0-9]+$ ]] || return 1
+  case "${unit^^}" in
+    K)    echo $(( number / 1024 )) ;;
+    ""|M) echo "$number" ;;
+    G)    echo $(( number * 1024 )) ;;
+    T)    echo $(( number * 1024 * 1024)) ;;
+    *)    return 1 ;;
+  esac
+}
+
+# -- parse options
+while (( $# )); do
+  case "$1" in
+    -h|--help)          usage ; exit    0          ;;
+       --norun)         norun=1 ; shift ; continue ;;
+    -j|--job)           jobfile="$2"               ;;
+    -g|--parallel-geom) parallel_geoms="$2"        ;;
+    -r|--ranks)         ranks="$2"                 ;;
+    -t|--threads)       threads="$2"               ;;
+    -p|--partition)     partition="$2"             ;;
+    -s|--parallel-sym)  parallel_syms="$2"         ;;
+       --model)         modelfile="$2"             ;;
+       --dir)           dirfile="$2"               ;;
+       --geometry)      geomfile="$2"              ;;
+       --config)        configfile="$2"            ;;
+       --main)          mainfile="$2"              ;;
+       --time)          walltime="$2"              ;;
+       --mem-per-cpu)   mempercpu="$2"             ;;
+       --name)          name="$2"                  ;;
+       --email)         email="$2"                 ;;
+    -?*) die "unknown option $1. See $PROGRAM -h for details" ;;
+    *)   die  "$PROGRAM does not accept non-option arguments. See $PROGRAM -h for details" ;;
+  esac
+  (( $# >= 2 )) || die  "option $1 needs an argument. See $PROGRAM -h for details"
+  shift 2
+done
+
+# -- check var values
+isint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+isint "$parallel_syms" || die "--parallel-sym must provide a non-negative integer, but got $parallel_syms"
+isint "$parallel_geoms" && (( parallel_geoms >= 1 )) || die "--parallel-geoms must provide a non-negative integer, but got $parallel_geoms"
+isint "$ranks"          && (( ranks >= 1 )) || die "--ranks must provide a positive integer, but got $ranks"
+isint "$threads"        && (( threads >= 1 )) || die "--threads must provide a positive itneger, but got $threads"
+
+for fname in  jobfile  modelfile dirfile configfile geomfile mainfile ; do
+  [[ -e "${!fname}" ]] || die "$fname: file '${!fname}' not found"
+  printf  -v "$fname" '%s' "$(readlink -f "${!fname}")"
+done
+
+# -- auto-define a name if there is none by this point
+: "${name:=noName.g${parallel_geoms}.s${parallel_syms}.r${ranks}.t${threads}}"
+
+nproc=$(( parallel_geoms  * ( parallel_syms >  0 ? parallel_syms  : 1 ) ))
+ntasks=$(( nproc * ranks ))
+
+# -- check partition cores and memory
+perMB=$(toMB "$mempercpu") || die "--mem-per-cpu '$mempercpu' is not a valid memory size. Try 4000 (M), 4000M, 4G.."
+if command -v scontrol >/dev/null ; then
+  scontrol show partition "$partition" >/dev/null 2>&1 || die "partition '$partition' DNE. Available partitions: $(sinfo -h -o %P | tr -d '*' | sort -u | paste -sd' ')"
+  node_cores=$(sinfo -h -N -p "$partition" -o %c | sort -n | head -n1)
+  node_memry=$(sinfo -h -N -p "$partition" -o %m | sort -n | head -n1)
+  ncores=$(( ntasks * threads ))
+  memMB=$(( ncores * perMB ))
+  (( ncores <= node_cores )) || die "$ncores cores requested, but nodes in '$partition' have $node_cores"
+  (( memMB <= node_memry )) || die "$ncores * $mempercpu = ${memMB}M requested, but nodes in '$partition' have ${node_memry}M"
+else
+  echo "WARN: no Slurm commands found, so we can't check the partition or node size" >&2
+fi
+
+export_vars="UKR_GEOMS=$parallel_geoms"
+export_vars+=",UKR_SYM=$parallel_syms"
+export_vars+=",UKR_RANKS=$ranks"
+export_vars+=",UKR_THREADS=$threads"
+export_vars+=",UKR_MODEL=$modelfile"
+export_vars+=",UKR_CONFIG=$configfile"
+export_vars+=",UKR_GEOM=$geomfile"
+export_vars+=",UKR_DIRS=$dirfile"
+export_vars+=",UKR_MAIN=$mainfile"
+
+echo
+echo "$name: $nproc calculation(s) * $ranks ranks * $threads threads = $(( ntasks * threads )) cores"
+echo
+
+commander=(
+  sbatch -J "$name"
+  ${email:+--mail-user "$email"}
+  --ntasks "$ntasks"
+  --cpus-per-task "$threads"
+  --time "$walltime"
+  --mem-per-cpu "$mempercpu"
+  --partition "$partition"
+  --export="ALL,$export_vars"
+  "$jobfile"
+)
+
+if (( norun )) ; then
+  printf '%s ' "${commander[@]}"
+  echo ; echo
+  exit 0
+fi
+
+mkdir -p sbatch_out
+"${commander[@]}"
