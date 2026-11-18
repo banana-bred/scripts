@@ -15,7 +15,7 @@ local kilo=1e3
 local mega=1e6
 local giga=1e9
 
-# -- physical constants and energy conversions taken from 2018 CODATA recommended values
+# -- physical constants and energy conversions taken from 2022 CODATA recommended values
 #    available at https://physics.nist.gov/cuu/Constants/index.html
 
 # -- physical constants constants
@@ -24,33 +24,33 @@ local hbar=1.054571817e-34 # -- hbar (J*s)
 local c=299792458          # -- speed of ligh in vacuum (m/s)
 
 # -- electric dipole
-local au2deb=2.5417462762781615
+local au2deb=2.54174647147304
 
 # -- energy
-local au2eV=27.211386245988                 # -- atomic units --> electron volts (eV)
-local au2J=4.3597447222071e-18              # -- atomic units --> Joules (J)
-local au2K=$(($au2J / $kboltz))             # -- atomic units --> Kelvin (K)
-local au2Ryd=2.0                            # -- atomic units --> Rydbgerg
-local au2invcm=$((1 / 4.5563552529120e-6))  # -- atomic units --> wavenumbers (inverse centimeters)
-local au2Hz=$(( 1 / 1.5198298460570e-16  )) # -- atomic units --> Hertz (Hz)
+local au2eV=27.211386245981      # -- atomic units --> electron volts (eV)
+local au2J=4.3597447222060e-18   # -- atomic units --> Joules (J)
+local au2K=315775.02480398       # -- atomic units --> Kelvin (K)
+local au2Ryd=2.0                 # -- atomic units --> Rydbgerg
+local au2invcm=219474.63136314  # -- atomic units --> wavenumbers (inverse centimeters)
+local au2Hz=6.5796839204999e15  # -- atomic units --> Hertz (Hz)
 local C2K=273.15
 
 # -- distance
-local au2ang=0.529177210903   # -- atomic units --> Ångström
+local au2ang=0.529177210544   # -- atomic units --> Ångström
 local in2m=0.0254             # -- inches       --> meters
 local mi2m=1609.344           # -- miles        --> meters
 local ft2m=0.3048             # -- feet         --> meters
 local ly2m=9460730472580800.0 # -- light-year   --> meters
 
 # -- time
-local min2sec=60.0                     # -- minutes     --> seconds
+local min2sec=60.0                        # -- minutes     --> seconds
 local hour2sec="$((60 * "$min2sec"))"     # -- hours       --> minutes
 local day2sec="$((24 * "$hour2sec"))"     # -- days        --> hours
 local year2sec="$((365.25 * "$day2sec"))" # -- years       --> days
-local planck2sec=5.39e-44              # -- planck time --> seconds
+local planck2sec=5.391247e-44             # -- planck time --> seconds
 
 # -- mass
-local lb_kg=0.4535924
+local lb_kg=0.45359237
 
 usage() {
  ## Prints general usage of the script.
@@ -114,22 +114,22 @@ $PROGRAM
 
       [time]
           s          :: seconds
-          ys         :: yoctoseconds (1e-24    s)
-          zs         :: zeptoseconds (1e-21    s)
-          as         :: attoseconds  (1e-18    s)
-          fs         :: femtoseconds (1e-15    s)
-          ps         :: picoseconds  (1e-12    s)
-          ns         :: nanoseconds  (1e-9     s)
-          μs         :: microseconds (1e-6     s)
-          ms         :: milliseconds (1e-3     s)
-          cs         :: centiseconds (1e-2     s)
-          ds         :: deciseconds  (1e-1     s)
-          ks         :: kiloseconds  (1e+3     s)
-          plancktime :: planck time  (5.39e-44 s)
+          ys         :: yoctoseconds (1e-24       s)
+          zs         :: zeptoseconds (1e-21       s)
+          as         :: attoseconds  (1e-18       s)
+          fs         :: femtoseconds (1e-15       s)
+          ps         :: picoseconds  (1e-12       s)
+          ns         :: nanoseconds  (1e-9        s)
+          μs         :: microseconds (1e-6        s)
+          ms         :: milliseconds (1e-3        s)
+          cs         :: centiseconds (1e-2        s)
+          ds         :: deciseconds  (1e-1        s)
+          ks         :: kiloseconds  (1e+3        s)
+          plancktime :: planck time  ($planck2sec s)
           min        :: minutes
           h          :: hours
           d          :: days
-          y          :: years
+          y          :: years (Julian, 365.25 days)
 
       Note: Distance and energy can be related to each other through the relation
 
@@ -159,13 +159,13 @@ die() {
 
 F2C() {
 	local F="$1"
-	local C=$(( ($F - 32) * 5 / 9 ))
+	local C=$(( ($F - 32.0) * 5.0 / 9.0 ))
 	echo "$C"
 }
 
 C2F() {
 	local C="$1"
-	local F=$(( ($C / 5 * 9) + 32 ))
+	local F=$(( ($C * 9.0 / 5.0 ) + 32.0 ))
 	echo "$F"
 }
 
@@ -270,7 +270,7 @@ time_from() {    # <-- time units
     y(ea|)r(s|))   val=$(($val * $year2sec))   ;;
     plancktime)    val=$(($val * $planck2sec)) ;;
 
-    ?s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
+    (y|z|a|f|p|n|μ|m|c|d|k)s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
 	esac
 
   echo "${val}" # --> seconds
@@ -319,7 +319,9 @@ energy_from() {    # <-- energy units
 		f|fahr*)  val=$((($(F2C $val) + $C2K)/ $au2K))   ;;
 		invcm*)   val=$(($val / $au2invcm))              ;;
 		hz)       val=$(($val / $au2Hz))                 ;;
+		khz)      val=$(($val * $kilo / $au2Hz))         ;;
 		mhz)      val=$(($val * $mega / $au2Hz))         ;;
+		thz)      val=$(($val * 1e12  / $au2Hz))        ;;
 		ghz)      val=$(($val * $giga / $au2Hz))         ;;
 		*) usage &&  die "I don't know how to convert $FROM to something else" ;;
 	esac
@@ -337,12 +339,14 @@ energy_to() {     # <-- atomic units (au)
 	  hartree*)                                       ;;
 		ryd*)     val=$(($val * $au2Ryd))               ;;
 		j*)       val=$(($val * $au2J))                 ;;
-		c|cel)    val=$(($val * $au2K - $C2K))          ;;
+		c|cel*)   val=$(($val * $au2K - $C2K))          ;;
 		k|kel*)   val=$(($val * $au2K))                 ;;
 		f|fahr*)  val=$(C2F $(($val * $au2K - $C2K)))   ;;
 		invcm*)   val=$(($val * $au2invcm))             ;;
 		hz)       val=$(($val * $au2Hz))                ;;
+    khz)      val=$(($val / $kilo * $au2Hz))        ;;
 		mhz)      val=$(($val / $mega * $au2Hz))        ;;
+    thz)      val=$(($val / 1e12  * $au2Hz))       ;;
 		ghz)      val=$(($val / $giga * $au2Hz))        ;;
 		*) usage &&  die "I don't know how to convert to '$TO'" ;;
 	esac
@@ -425,7 +429,7 @@ main() {
 	TO="$3"
 	EXPONENT="$4"
 
-  [[ -z "${EXPONENT}" ]] && EXPONENT=1 || ( [[ "${EXPONENT}" -lt 1 ]] && die "Exponent (${EXPONENT}) must be greater or equal to 1" )
+  [[ -z "${EXPONENT}" ]] && EXPONENT=1 || { [[ "${EXPONENT}" -lt 1 ]] && die "Exponent (${EXPONENT}) must be greater or equal to 1" }
 
 	case "${FROM:l}" in
 
@@ -433,15 +437,15 @@ main() {
 			intype="mass"
 			;;
 
-		ev| hartree*| ryd*| j*| f|fahr*| c|cel*| k|kel*| invcm*| ?hz|hz)
+    ev| hartree*| ryd*| j*| f|fahr*| c|cel*| k|kel*| invcm*| (k|m|g|t)hz|hz)
 			intype="energy"
 			;;
 
-		?m|m| ang*|bohr| ft|feet|foot|in|inch*|mi|mile* |ly)
+    (y|z|a|f|p|n|μ|m|c|d|k)m|m| ang*|bohr| ft|feet|foot|in|inch*|mi|mile* |ly)
 			intype="length"
 			;;
 
-    ?s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
+    (y|z|a|f|p|n|μ|m|c|d|k)s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
       intype="time"
       ;;
 
@@ -461,15 +465,15 @@ main() {
 			outtype="mass"
 			;;
 
-		ev|hartree*|ryd*|j*|f|fahr*|c|cel*|k|kel*|invcm*|?hz|hz)
+    ev|hartree*|ryd*|j*|f|fahr*|c|cel*|k|kel*|invcm*|(k|m|g|t)hz|hz)
 			outtype="energy"
 			;;
 
-		?m|m| ang*|bohr| ft|feet|foot|in|inch*|mi|mile* |ly)
+    (y|z|a|f|p|n|μ|m|c|d|k)m|m| ang*|bohr| ft|feet|foot|in|inch*|mi|mile* |ly)
 			outtype="length"
 			;;
 
-    ?s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
+    (y|z|a|f|p|n|μ|m|c|d|k)s|s|sec*| min*| h|h(ou|)r(s|)| d(ay|ays)| y(ea|)r(s|)| plancktime)
       outtype="time"
       ;;
 
@@ -524,7 +528,13 @@ main() {
 
   fi
 
-  echo "$(( ${result}**${EXPONENT} ))"
+  if (( EXPONENT > 1 )) ; then
+    [[ "${intype}" = "${outtype}" && "${FROM:l}" != (c|cel*|f|fahr*) && "${TO:l}" != (c|cel*|f|fahr*) ]] ||
+        die "Exponents only work between units of the same kind, and not with Celsius or Fahrenheit."
+    result=$(( ${NUM} * $("${outtype}_to" $("${intype}_from" 1.0 "${FROM:l}") "${TO:l}")**${EXPONENT} ))
+  fi
+
+  printf '%.15g\n' "${result}"
 
 }
 
