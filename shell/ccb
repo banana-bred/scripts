@@ -1,0 +1,285 @@
+#!/bin/zsh
+
+emulate -L zsh
+
+PROGRAM=${${(%):-%x}:t}
+CHROOT="${HOME}/chroot"
+AURCACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/paru/clone"
+install=true
+force=false
+review=true
+MKCHROOTPKGFLAGS=""
+typeset -a AUR       # AUR package bases to be built
+typeset -a AURDIRS   # their repos
+typeset -a AURPKGS   # package files built from them
+
+usage() {
+    # Prints general usage of the script.
+
+    cat <<help
+
+$PROGRAM
+
+    Build  a package in a clean Artix chroot and then install it.
+
+    Run this in the directory containing the desired PKGBUILD.
+
+    usage: ${PROGRAM} [options]
+
+    options:
+
+    -h,--help                    show this message
+    -f,--force                   run with force (overwrite any existing chroot without asking. Yikes !)
+    --chroot[=] CHROOT            use a different chroot than the default ($HOME/chroot)
+    --aur[=] PKG1,PKG2,...        AUR dependencies that will be built first
+    --aur-dir[=] DIR              where AUR repos are cloned
+    --no-review                   don't offer to review AUR PKGBUILDS before building.
+                                  Make sure you know these packages !
+    --no-install                  don't install the built packages
+    --mkchrootpkg-flags=<STRING>  extra flags passed as a string to mkchrootpkg
+                                  (makepkg flags go after "--", e.g., "-- --nocheck")
+
+    AUR repos are cached in AURCACHE=${AURCACHE}
+
+help
+}
+
+die() {
+  print -u2 ""
+  print -u2 -- "ERROR: $*"
+  exit 1
+}
+
+need() {
+  (( $+commands[$1] )) || die "needed $1 not found ($2)"
+}
+
+
+# -- fill reply with package files produced by PKGBUILD in $PWD
+built_pkgs() {
+  local -a list
+  list=(${(f)"$(makepkg --packagelist)"}) || return 1
+  list=(${list:#*-debug-*})
+  reply=(${^list}(N:A))
+}
+
+# -- build the PKGBUILD in pwd in a clean copy of the chroot + every aur package so far
+#    built as well
+chroot_build() {
+  local -a cmd extra
+  local f
+  for f in "${AURPKGS[@]}"; do
+    extra+=(-I "$f")
+  done
+  cmd=(mkchrootpkg -c -r "${CHROOT}" "${extra[@]}" "$@")
+  print "===> ${cmd[*]}"
+  sudo "${cmd[@]}" || die "${cmd[*]} failed"
+}
+
+# -- clone or update an AUR repo into the cache
+fetch_aur() {
+  local name=$1
+  local dir="${AURCACHE}/${name}"
+  local cloned=false
+
+  if [[ -d "${dir}/.git" ]]; then
+    print "===> Updating AUR repo ${name}"
+    git -C "${dir}" pull --ff-only || die "git pull failed for ${name}"
+  else
+    [[ -e "${dir}" ]] && die "${dir} exists but isn't a git repo; not touching it"
+    print "===> Cloning AUR repo ${name}"
+    mkdir -p -- "${AURCACHE}" || die "Failed to make ${AURCACHE}"
+    git clone "https://aur.archlinux.org/${name}.git" "${dir}" || die "git clone failed for ${name}"
+    cloned=true
+  fi
+
+  if [[ ! -s "${dir}/PKGBUILD" ]]; then
+    $cloned && rm -rf -- "${dir}"   # only remove what we made
+    die "'${name}' doesn't seem to exist on the AUR (no PKGBUILD). Is it the package *base* name?"
+  fi
+
+  REPLY=$dir
+}
+
+# -- always check AUR PKGBUILDs !! never forget
+review_aur() {
+  local dir=$1 answer
+  local -a files
+  $review || return 0
+
+  # -- files tracked by the AUR repo
+  files=(${(f)"$(git -C "${dir}" ls-files)"})
+  files=(${dir}/${^files}(.N))
+
+  while true; do
+    printf '%s' "AUR package ${dir:t}: [v]iew files, [b]uild, [q]uit ? [v] : "
+    read answer
+    case ${answer:l} in
+      v|view|"") ${=${PAGER:-less}} "${files[@]}" ;;
+      b|build)   return 0 ;;
+      q|quit)    die "Aborted." ;;
+      *)         print "What ? '${answer}' is not an option \!" ;;
+    esac
+  done
+}
+
+setup(){
+  local answer name
+
+  printf "Checking if we have a PKGBUILD ... "
+  [[ -s "PKGBUILD" ]] || die "${PROGRAM} must be run in a directory containing a PKGBUILD"
+  print "✔️"
+
+  printf "Checking required programs ... "
+  need mkchroot     artools-base
+  need mkchrootpkg  artools-pkg
+  need artix-chroot artools-base
+  need makepkg      pacman
+  (( ${#AUR} )) && need git git
+  print "✔️"
+
+  # -- don't delete sus directories
+  case $CHROOT in
+    ""|/|/home|/root|/usr|/etc|/var|"${HOME:A}")
+      die "Um, removing $CHROOT seems dangerous. I refuse \!"
+  esac
+
+  # -- get and review the AUR stuff
+  for name in "${AUR[@]}"; do
+    fetch_aur "${name}"
+    review_aur "${REPLY}"
+    AURDIRS+=("${REPLY}")
+  done
+
+  printf '%s' "Setting up chroot in ${CHROOT} "
+
+  if [[ -e "${CHROOT}" ]] ; then
+    if ! $force; then
+      while true; do
+        printf "\n${CHROOT} exists; we need to remove it to proceed. OK ? [y/n] : "
+        read answer
+        case ${answer:l} in
+          y|ye|yes) break ;;
+          n|no|) die "Fine. Not deleting ${CHROOT}, but that means we  can't do anything." ;;
+            *) print "What ? '${answer}' is not an option \!" ;;
+        esac
+      done
+    fi
+   sudo rm -rf -- "${CHROOT}" || die "Couldn't remove ${CHROOT}"
+  fi
+
+  mkdir -p -- "${CHROOT}" || die "Failed to make ${CHROOT}"
+  print "✔️"
+}
+
+build() {
+  local root="${CHROOT}/root"
+  local startdir=$PWD
+  local -a cmd mkflags
+  local i
+
+  # 0) base
+  cmd=(mkchroot "${root}" base-devel)
+  print "===> ${cmd[*]}"
+  sudo "${cmd[@]}" || die "${cmd[*]} failed"
+
+  # 1) use host repositories
+  print "===> Copying host's pacman config"
+  sudo cp /etc/pacman.conf "${root}/etc/pacman.conf" || die "Failed to copy pacman.conf"
+  sudo cp /etc/pacman.d/mirrorlist "${root}/etc/pacman.d/mirrorlist" || die "Failed to copy mirrorlist"
+  if [[ -f /etc/pacman.d/mirrorlist-arch ]] ;  then
+    sudo cp /etc/pacman.d/mirrorlist-arch "${root}"/etc/pacman.d/mirrorlist-arch ||
+      die "mirrorlist-arch exists, but we failed to copy it \!"
+  fi
+
+  # -- chroot isn't a mount point, so pacman checks for free space and finds none.
+  #    Disable CheckSpace
+  sudo sed -i 's/^[[:space:]]*CheckSpace/#CheckSpace/' "${root}/etc/pacman.conf" ||
+    die "Failed to disable CheckSpace in the chroot \!"
+  # 2) keyring + full update
+  print "===> Installing keyrings, updating chroot"
+  sudo artix-chroot "${root}" pacman -Syyu --noconfirm --needed artix-keyring archlinux-keyring ||
+    die "Keyring install / chroot update failed \!"
+  sudo artix-chroot "${root}" pacman-key --populate artix archlinux ||
+    die " pacman-key --populate failed \!"
+
+  # 3) AUR dependencies, in the given order
+  for (( i = 1; i <= ${#AURDIRS}; i++ )); do
+    print "===> Building AUR dependency ${AUR[i]}"
+    cd -- "${AURDIRS[i]}" || die "cd ${AURDIRS[i]} failed"
+    chroot_build
+    built_pkgs || die "makepkg --packagelist failed for ${AUR[i]}"
+    (( ${#reply} )) || die "Couldn't find any built packages for ${AUR[i]} \!"
+    AURPKGS+=("${reply[@]}")
+  done
+  cd -- "${startdir}" || die "cd ${startdir} failed"
+
+  # 4) build the actual package, finally
+  mkflags=(${(Q)${(z)MKCHROOTPKGFLAGS}})
+  chroot_build "${mkflags[@]}"
+
+  $install || return 0
+
+  # 5) install AUR dependencies first, then the package
+  built_pkgs|| die "makepkg --packagelist failed \!"
+  (( ${#reply} )) || die "Couldn't find any built packages \!"
+
+  if (( ${#AURPKGS} )); then
+    print "==> pacman -U --asdeps ${AURPKGS[*]}"
+    sudo pacman -U --needed --asdeps -- "${AURPKGS[@]}" || die "pacman -U (AUR deps) failed"
+  fi
+
+  print "===> pacman -U ${reply[@]}"
+  sudo pacman -U -- "${reply[@]}" || die "pacman -U failed \!"
+}
+
+main() {
+
+  while (( $# )) ; do
+    case $1 in
+
+			-h|--help) usage ; exit 0 ;;
+			-f|--force) force=true ;;
+      --chroot)
+        [[ -n $2 ]] || die "'--chroot' requires a non-empty argument"
+        CHROOT="$2"
+        shift
+        ;;
+      --chroot=) die "'--chroot' requires a non-empty argument" ;;
+      --chroot=?*) CHROOT="${1#*=}" ;;
+      --aur)
+        [[ -n $2 ]] || die "'--aur' requires a non-empty argument"
+        AUR+=(${(s:,:)2})
+        shift
+        ;;
+      --aur=)   die "'--aur' requires a non-empty argument" ;;
+      --aur=?*) AUR+=(${(s:,:)${1#*=}}) ;;
+      --aur-dir)
+        [[ -n $2 ]] || die "'--aur-dir' requires a non-empty argument"
+        AURCACHE="$2"
+        shift
+        ;;
+      --aur-dir=)   die "'--aur-dir' requires a non-empty argument" ;;
+      --aur-dir=?*) AURCACHE="${1#*=}" ;;
+      --no-review) review=false ;;
+      --mkchrootpkg-flags=)  die "'--mkchrootpkg-flags' requires a non-empty argument" ;;
+      --mkchrootpkg-flags=?*) MKCHROOTPKGFLAGS="${1#*=}" ;;
+      --no-install)   install=false ;;
+      --)             shift; break ;;
+      -?*)            die "Unknown option: $1 (see --help for help)" ;;
+      *)              die "Unexpected argument: $1 (see --help for help)" ;;
+		esac
+		shift
+	done
+
+  # -- ensure absolute paths
+  [[ $CHROOT   == "~"(/*|) ]] && CHROOT="${HOME}${CHROOT#\~}"
+  [[ $AURCACHE == "~"(/*|) ]] && AURCACHE="${HOME}${AURCACHE#\~}"
+  CHROOT="${CHROOT:A}"
+  AURCACHE="${AURCACHE:A}"
+
+  setup
+  build
+}
+
+main "$@"

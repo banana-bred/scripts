@@ -1,0 +1,98 @@
+#!/usr/bin/env zsh
+
+zmodload zsh/mathfunc
+emulate -L zsh
+
+PROGRAM="${0:t}"
+
+D_DEFAULT=1.0
+A_DEFAULT=1.0
+R0_DEFAULT=1.0
+RI_DEFAULT=0.5
+RF_DEFAULT=6.0
+N_DEFAULT=100
+
+usage() {
+
+  cat <<help
+
+$PROGRAM
+
+    Write a tabulated morse potential given the parameters.
+
+USAGE
+
+    $PROGRAM [OPTIONS]
+
+OPTIONS
+
+    -h,--help       show this helpful message
+    -D        VAL   well depth (default $D_DEFAULT)
+    -a        VAL   width (default $A_DEFAULT)
+    --r0      VAL   equilibrium distance (default $R0_DEFAULT)
+    --ri      VAL   first r (default $RI_DEFAULT)
+    --rf      VAL   last r (default $RF_DEFAULT)
+    -n        VAL   number of points (default $N_DEFAULT)
+    --shift         subtract D so that V -> 0 at large r
+
+OUTPUT
+
+    Columns:  r     V(r)
+
+help
+}
+
+
+die() {
+  print -u2 -- "ERROR: $*"
+  exit 1
+}
+
+isnumber() {
+  [[ $1 == ([-+]|)([0-9]##(.[0-9]#|)|.[0-9]##)([eE][-+]#[0-9]##|) ]]
+}
+
+# -- options
+setopt extended_glob
+
+local -A opt
+zparseopts -D -F -A opt -- \
+  h -help D: a: -r0: -ri: -rf: n: -shift || { usage >&2 ; exit 1 }
+
+(( ${+opt[-h]} || ${+opt[--help]} )) && { usage; exit 0 }
+(( $# )) && die "unexpected argument(s): $*"
+
+[[ ${opt[-n]:-$N_DEFAULT} == [0-9]## ]] || die "-n expects a positive integer, got $n"
+
+for key val in ${(kv)opt} ; do
+  [[ $key == (-h|--help|--shift) ]] && continue
+  isnumber "$val" || die "$key expects a number, got $val"
+done
+
+float    D=${opt[-D]:-$D_DEFAULT}
+float    a=${opt[-a]:-$A_DEFAULT}
+float    r0=${opt[--r0]:-$R0_DEFAULT}
+float    ri=${opt[--ri]:-$RI_DEFAULT}
+float    rf=${opt[--rf]:-$RF_DEFAULT}
+integer  n=${opt[-n]:-$N_DEFAULT}
+
+(( n >= 2 )) || die "-n ($n) must be ≥ 2"
+(( rf > ri )) || die "--rf $((rf)) must be greater than --ri $((ri))"
+
+float shift=0
+(( ${+opt[--shift]} )) && shift=$(( D ))
+
+# -- V(r )= D (1-exp(-a (r-r0)))² - shift
+
+float dr=$(( (rf - ri) / (n - 1) ))
+
+print -- "# morse D=$((D))  a=$((a))  r0=$((r0))  shift=$(( ${+opt[--shift]} ))"
+print -- "# r    V(r)"
+
+integer i
+float r V
+for (( i = 0; i < n; i++ )); do
+  r=$(( ri + i * dr ))
+  V=$(( D * (1 - exp(-a * (r - r0)))**2 - shift ))
+  printf -- '  %.12e    %.12e\n' $((r)) $((V))
+done

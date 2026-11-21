@@ -1,0 +1,178 @@
+#!/bin/bash
+# Potential Energy Curves from an OpenMolcas FOREACH log
+#
+#   pec HI.log                          MRCI, hartree, to the screen
+#   pec -l CASSCF HI.log                another level
+#   pec -s last -u eV -o HI.dat HI.log  shifted, in eV, to a file
+#
+# pec -h for all options
+
+PROGRAM="${0##*/}"
+
+usage() {
+  cat <<help
+
+$PROGRAM
+
+    Potential Energy Curves from an OpenMolcas FOREACH log.
+    One row per R, two columns per state: E and E+Q (Davidson correction)
+
+USAGE
+
+    $PROGRAM [OPTIONS] LOGFILE
+
+OPTIONS
+
+    -h,--help          show this helpful message
+    -a,--available     list available energy levels in LOGFILE and exit happily
+    -l,--level LEVEL   MRCI [default] | SCF | KSDFT | RASSCF (i.e. CASSCF) | CASPT2..
+    -s,--shift SHIFT   none [default] | last | min | <some energy in hartree>
+                          - last: subtract the ground state energy at the last R
+                          - min : subtract the ground state minimum
+    -u,--units UNITS   Eh [default] | eV | invcm
+
+EXAMPLES
+
+  $PROGRAM H2O.log
+  $PROGRAM -l CASSCF H2O.log
+  $PROGRAM -s last -u eV H2O.log
+
+help
+}
+
+die() {
+  echo "$ERROR: $*" >&2
+  exit 1
+}
+
+level=MRCI ; shift_=none ; units=Eh ; log="" ; available=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)   usage; exit 0 ;;
+    -a|--available) available=true ;;
+    -l|--level)  [ -n "$2" ] || die "$1 needs a value"; level="$2"; shift ;;
+    -s|--shift)  [ -n "$2" ] || die "$1 needs a value"; shift_="$2"; shift ;;
+    -u|--units)  [ -n "$2" ] || die "$1 needs a value"; units="$2"; shift ;;
+    --level=*)   level="${1#*=}" ;;
+    --shift=*)   shift_="${1#*=}" ;;
+    --units=*)   units="${1#*=}" ;;
+    -*)          die "unknown option '$1' (see $PROGRAM -h)" ;;
+    *)           [ -z "$log" ] || die "only one log file allowed \!"; log="$1" ;;
+  esac
+  shift
+done
+
+[ -n "$log" ] || {
+  die "No log file given \! Try $PROGRAM -h for help"
+}
+[ -r "$log" ] || die "can't read '$log'"
+
+# -- use awk to check only which energies are available
+if $available; then
+  awk -v prog="$PROGRAM" '
+    function add(l) { c[l, n]++; if (!(l in seen)) { seen[l] = 1; order[++nl] = l } }
+    /^>>> EXPORT R =/              { n++; next }
+    !n                             { next }
+    /^ *CI State /                 { add("MRCI"); next }
+    /^:: +Total SCF energy/        { add("SCF"); next }
+    /^:: +Total KS-DFT energy/     { add("KSDFT"); next }
+    /^:: +RASSCF root number/      { add("RASSCF"); next }
+    /^:: +[A-Z0-9-]+ Root +[0-9]+ +Total energy:/ { add($2); next }
+    END {
+      if (!n)  { print prog ": no '\''>>> EXPORT R ='\'' lines found" > "/dev/stderr"; exit 1 }
+      if (!nl) { print prog ": no energies found" > "/dev/stderr"; exit 1 }
+      printf "%d points (R values)\n\n  %-12s %12s %12s\n", n, "level", "per point", "points"
+      for (i = 1; i <= nl; i++) {
+        l = order[i]; lo = 0; hi = 0; p = 0
+        for (j = 1; j <= n; j++) {
+          v = c[l, j] + 0
+          if (v) p++
+          if (j == 1 || v < lo) lo = v
+          if (v > hi) hi = v
+        }
+        printf "  %-12s %12s %12s\n", l, (lo == hi ? hi : lo "-" hi), p "/" n
+      }
+    }' "$log"
+  exit
+fi
+
+read -r -d '' prog <<'AWK'
+BEGIN {
+  if (level == "") level = "MRCI"
+  if (shift == "") shift = "none"
+  if (units == "") units = "Eh"
+  L = toupper(level); S = tolower(shift); U = tolower(units)
+  if (L == "CASSCF") L = "RASSCF"
+  if      (L == "MRCI")   pat = "^ *CI State "
+  else if (L == "SCF")    pat = "^:: +Total SCF energy"
+  else if (L == "KSDFT")  pat = "^:: +Total KS-DFT energy"
+  else if (L == "RASSCF") pat = "^:: +RASSCF root number"
+  else                    pat = "^:: +" L " Root "    # CASPT2 and friends
+  # -- cols per energy
+  w = (L == "MRCI") ? 2 : 1
+
+  if      (U == "eh" || U == "hartree" || U == "au") { f = 1;               U = "Eh" }
+  else if (U == "ev")                                { f = 27.211386245988; U = "eV" }
+  else if (U == "invcm" || U == "cm")                { f = 219474.6313632;  U = "invcm" }
+  else { print prog ": units must be Eh, eV, invcm" > "/dev/stderr"; bad = 1; exit 1 }
+
+  if (S != "none" && S != "last" && S != "min" && S !~ /^[-+]?[0-9.]+([eEdD][-+]?[0-9]+)?$/) {
+    print prog ": shift must be none, last, min or a number (hartree)" > "/dev/stderr"; bad = 1; exit 1
+  }
+}
+
+/^>>> EXPORT R =/ { n++; R[n] = $5; k[n] = 0; next }
+
+$0 ~ pat && n {
+  if (L == "MRCI") { k[n]++; V[n, k[n]] = $6; k[n]++; V[n, k[n]] = $6 + $8 }
+  else             { k[n]++; V[n, k[n]] = $NF }
+  if (k[n] > m) m = k[n]
+}
+
+# reference energy for column c (1, or 2 for MRCI E+Q), or "" if none
+function ref(c,    i, r) {
+  if (S == "none") return 0
+  if (S != "last" && S != "min") return S + 0
+  r = ""
+  if (S == "last") {
+    for (i = n; i >= 1; i--) if (k[i] >= c) return V[i, c]
+  } else {
+    for (i = 1; i <= n; i++) if (k[i] >= c && (r == "" || V[i, c] < r)) r = V[i, c]
+  }
+  return r
+}
+
+END {
+  if (bad) exit 1
+  if (!n) { print prog ": no '>>> EXPORT R =' lines found" > "/dev/stderr"; exit 1 }
+  if (!m) { print prog ": no " L " energies found" > "/dev/stderr"; exit 1 }
+
+  for (c = 1; c <= w; c++) {
+    r0[c] = ref(c)
+    if (r0[c] == "") { print prog ": no reference energy for shift=" S > "/dev/stderr"; exit 1 }
+  }
+
+  printf "# %s energies in %s", L, U
+  if (S != "none") printf ", shifted by the %s ground state energy (%.10f Eh%s)", \
+      (S == "last" ? "last-R" : (S == "min" ? "minimum" : "given")), r0[1], \
+      (w == 2 ? ", E+Q: " sprintf("%.10f", r0[2]) " Eh" : "")
+  printf "\n#%7s", "R"
+  for (j = 1; j <= m; j++)
+    if (w == 2) printf "  %16s", (j % 2 ? "E" : "E+Q") int((j + 1) / 2)
+    else        printf "  %16s", L "_" j
+  printf "\n"
+
+  fmt = (f == 1 && S == "none") ? "  %16.8f" : "  %16.6f"
+  for (i = 1; i <= n; i++) {
+    printf "%8s", R[i]
+    for (j = 1; j <= m; j++) {
+      c = (w == 2) ? 2 - j % 2 : 1
+      if (j <= k[i]) printf fmt, (V[i, j] - r0[c]) * f
+      else           printf "  %16s", "nan"
+    }
+    printf "\n"
+  }
+}
+AWK
+
+awk -v prog="$PROGRAM" -v level="$level" -v shift="$shift_" -v units="$units" "$prog" "$log"
