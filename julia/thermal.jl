@@ -104,7 +104,7 @@ function main()
   end
 
   numer = [ integrate(EelGrid, probs          .* exp.(- EelGrid ./ kT)) for kT in kTGrid ./ au2K ]
-  denom = [ integrate(EelGrid, sqrt.(EelGrid) .* exp.(- EelGrid ./ kT)) for kT in kTGrid ./ au2K ]
+  denom = [ sqrt(pi) / 2 * kT^1.5 for kT in kTGrid ./ au2K ]
 
   rate = numer ./ denom
 

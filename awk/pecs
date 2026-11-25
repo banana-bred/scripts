@@ -71,7 +71,8 @@ done
 if $available; then
   awk -v prog="$PROGRAM" '
     function add(l) { c[l, n]++; if (!(l in seen)) { seen[l] = 1; order[++nl] = l } }
-    /^>>> EXPORT R =/              { n++; next }
+    /^>>> *FOREACH +[A-Za-z_][A-Za-z0-9_]* +IN/ { lv = $3; next }
+    /^>>> *EXPORT / { v = $3; sub(/=.*/, "", v); if (v == (lv == "" ? "R" : lv)) n++; next }
     !n                             { next }
     /^ *CI State /                 { add("MRCI"); next }
     /^:: +Total SCF energy/        { add("SCF"); next }
@@ -79,7 +80,7 @@ if $available; then
     /^:: +RASSCF root number/      { add("RASSCF"); next }
     /^:: +[A-Z0-9-]+ Root +[0-9]+ +Total energy:/ { add($2); next }
     END {
-      if (!n)  { print prog ": no '\''>>> EXPORT R ='\'' lines found" > "/dev/stderr"; exit 1 }
+      if (!n)  { print prog ": no '\''>>> EXPORT'\'' lines for the loop variable found" > "/dev/stderr"; exit 1 }
       if (!nl) { print prog ": no energies found" > "/dev/stderr"; exit 1 }
       printf "%d points (R values)\n\n  %-12s %12s %12s\n", n, "level", "per point", "points"
       for (i = 1; i <= nl; i++) {
@@ -121,7 +122,29 @@ BEGIN {
   }
 }
 
-/^>>> EXPORT R =/ { n++; R[n] = $5; k[n] = 0; next }
+# -- loop variable from ">>> FOREACH X IN (...)". Default is R
+/^>>> *FOREACH +[A-Za-z_][A-Za-z0-9_]* +IN/ { lv = $3; next }
+
+# -- new point at each loop variable export
+/^>>> *EXPORT +[A-Za-z_][A-Za-z0-9_]* *=/ {
+  line = $0; sub(/^>>> *EXPORT +/, "", line)
+  name = line; sub(/ *=.*/, "", name)
+  val  = line; sub(/^[^=]*= */, "", val); sub(/ +$/, "", val)
+  if (name == (lv == "" ? "R" : lv)) { n++; k[n] = 0; R[n] = val; ivar[name] = val }
+  else if (n) ivar[name] = val
+  if (name == "R" && n) R[n] = val
+  next
+}
+
+# -- ">>> EVAL R = RI + dR * $I": substitute variables, evaluate
+/^ *>>> *EVAL +R *=/ && n { v = $0
+  sub(/.*= */, "", v)
+  v = sprintf("%.6f", v)
+  sub(/0+$/, "", v)
+  sub(/\.$/, ".0", v)
+  R[n] = v
+  next
+}
 
 $0 ~ pat && n {
   if (L == "MRCI") { k[n]++; V[n, k[n]] = $6; k[n]++; V[n, k[n]] = $6 + $8 }
@@ -144,7 +167,7 @@ function ref(c,    i, r) {
 
 END {
   if (bad) exit 1
-  if (!n) { print prog ": no '>>> EXPORT R =' lines found" > "/dev/stderr"; exit 1 }
+  if (!n) { print prog ": no '>>> EXPORT " (lv == "" ? "R" : lv) " =' lines found" > "/dev/stderr"; exit 1 }
   if (!m) { print prog ": no " L " energies found" > "/dev/stderr"; exit 1 }
 
   for (c = 1; c <= w; c++) {
